@@ -7,7 +7,7 @@ import app as app_module
 os.environ["SECRET_KEY"] = "test-secret-is-only-for-tests-not-production"
 os.environ["DATABASE_URL"] = "sqlite://"
 import pytest
-from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, AlertSettings, SectorGoal, ReportSchedule, SMTPConfig, Question, Response, Answer, ActionPlan, RespondentIdentity, Audit, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment
+from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, AlertSettings, SectorGoal, ReportSchedule, SMTPConfig, SystemIncident, Question, Response, Answer, ActionPlan, RespondentIdentity, Audit, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment, send_due_invite_reminders
 
 @pytest.fixture()
 def client():
@@ -481,3 +481,77 @@ def test_whatsapp_optional_and_disabled_modes(client):
     client.post("/p/wa-desativado", data={"stage":"identity", "whatsapp_number":"81999991234"})
     with app.app_context():
         assert RespondentIdentity.query.filter_by(survey_id=2).one().whatsapp_number == ""
+
+
+class FakeSMTP:
+    sent_messages = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def starttls(self):
+        pass
+
+    def login(self, *args):
+        pass
+
+    def send_message(self, message):
+        self.sent_messages.append(message)
+
+
+def test_master_can_test_saved_smtp_configuration(client, monkeypatch):
+    FakeSMTP.sent_messages = []
+    monkeypatch.setattr(app_module.smtplib, "SMTP", FakeSMTP)
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        db.session.add(SMTPConfig(host="smtp.example.test", port=25, tls=False, from_address="pesquisa@example.test"))
+        db.session.commit()
+    signin(client, "master", "long-test-pass")
+    response = client.post("/admin/settings/smtp", data={"action": "test", "test_recipient": "destino@example.test"})
+    assert response.status_code == 200
+    assert b"E-mail de teste enviado" in response.data
+    assert len(FakeSMTP.sent_messages) == 1
+    assert FakeSMTP.sent_messages[0]["To"] == "destino@example.test"
+
+
+def test_automatic_reminder_only_sends_for_opted_in_surveys(client, monkeypatch):
+    FakeSMTP.sent_messages = []
+    monkeypatch.setattr(app_module.smtplib, "SMTP", FakeSMTP)
+    with app.app_context():
+        db.session.add(SMTPConfig(host="smtp.example.test", port=25, tls=False, from_address="pesquisa@example.test"))
+        enabled = Survey(title="Lembrete ligado", slug="lembrete-ligado", active=True, target="publico",
+                         automatic_reminders=True, reminder_delay_days=3)
+        disabled = Survey(title="Lembrete desligado", slug="lembrete-desligado", active=True, target="publico",
+                          automatic_reminders=False, reminder_delay_days=3)
+        db.session.add_all([enabled, disabled])
+        db.session.flush()
+        due = now() - timedelta(days=4)
+        db.session.add_all([
+            SurveyInvite(survey_id=enabled.id, email="pessoa1@example.test", created_at=due),
+            SurveyInvite(survey_id=disabled.id, email="pessoa2@example.test", created_at=due),
+        ])
+        db.session.commit()
+        count = send_due_invite_reminders(now())
+        assert count == 1
+        invite = SurveyInvite.query.filter_by(survey_id=enabled.id).one()
+        assert invite.reminder_sent_at is not None
+        assert invite.response_token_hash
+        assert SurveyInvite.query.filter_by(survey_id=disabled.id).one().reminder_sent_at is None
+    assert len(FakeSMTP.sent_messages) == 1
+
+
+def test_system_health_is_master_only_and_lists_incidents(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        db.session.add(SystemIncident(component="application", summary="Falha de teste"))
+        db.session.commit()
+    signin(client, "master", "long-test-pass")
+    page = client.get("/admin/system-health")
+    assert page.status_code == 200
+    assert b"Falha de teste" in page.data

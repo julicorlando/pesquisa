@@ -1,0 +1,11 @@
+{% extends "base.html" %}{% block content %}
+<h1>Saúde do sistema</h1><p>Resumo operacional visível somente ao Master. Nenhuma credencial SMTP é exibida nesta página.</p>
+<div class="cards">
+<div class="card"><h2>Aplicação</h2><p>Esta página carregou corretamente.</p><strong class="status-ok">Online</strong></div>
+<div class="card"><h2>Banco de dados</h2><p>{% if database_ok %}<strong class="status-ok">Conectado</strong>{% else %}<strong class="status-error">Sem conexão</strong>{% endif %}</p></div>
+<div class="card"><h2>SMTP</h2><p>{% if smtp_configured %}<strong>Configurado</strong>{% else %}<strong>Não configurado</strong>{% endif %}</p><p>Alertas ao Master: {% if alert_email_configured %}configurados{% else %}sem destinatário configurado{% endif %}</p><a href="{{ url_for('smtp_settings') }}">Configurar e testar envio</a></div>
+</div>
+<h2>Ocorrências</h2><p>Falhas são agrupadas por componente para evitar alertas repetidos. Corrija a causa e marque a ocorrência como resolvida.</p>
+<div class="tablewrap card"><table><thead><tr><th>Componente</th><th>Resumo</th><th>Registrada</th><th>Status</th><th>Ação</th></tr></thead><tbody>
+{% for item in incidents %}<tr><td>{{ item.component }}</td><td>{{ item.summary }}</td><td>{{ item.created_at.strftime('%d/%m/%Y %H:%M:%S UTC') }}</td><td>{% if item.resolved_at %}Resolvida{% else %}Aberta{% endif %}</td><td>{% if not item.resolved_at %}<form method="post" action="{{ url_for('resolve_system_incident', incident_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn secondary">Marcar resolvida</button></form>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="5">Nenhuma ocorrência registrada.</td></tr>{% endfor %}
+</tbody></table></div>{% endblock %}

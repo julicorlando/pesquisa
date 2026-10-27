@@ -19,7 +19,7 @@ from email.message import EmailMessage
 from functools import wraps
 from urllib.parse import urlparse
 
-from flask import Flask, request, redirect, url_for, render_template, flash, abort, session, jsonify, send_file
+from flask import Flask, request, redirect, url_for, render_template, flash, abort, session, jsonify, send_file, has_request_context
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf.csrf import CSRFProtect
@@ -179,6 +179,7 @@ class SMTPConfig(db.Model):
     tls = db.Column(db.Boolean, default=True)
     username = db.Column(db.String(255), default="")
     from_address = db.Column(db.String(255), default="")
+    master_alert_email = db.Column(db.String(255), default="")
     password_encrypted = db.Column(db.Text)
     updated_at = db.Column(db.DateTime(timezone=True), default=now)
 
@@ -196,6 +197,8 @@ class Survey(db.Model):
     starts_at = db.Column(db.DateTime(timezone=True))
     ends_at = db.Column(db.DateTime(timezone=True))
     response_limit = db.Column(db.String(20), nullable=False, default="none")
+    automatic_reminders = db.Column(db.Boolean, nullable=False, default=False)
+    reminder_delay_days = db.Column(db.Integer, nullable=False, default=3)
     questions = db.relationship("Question", backref="survey", order_by="Question.position", cascade="all,delete-orphan")
 
 class Question(db.Model):
@@ -269,6 +272,13 @@ class Audit(db.Model):
     ip_hash = db.Column(db.String(64))
     created_at = db.Column(db.DateTime(timezone=True), default=now)
 
+class SystemIncident(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    component = db.Column(db.String(40), nullable=False)
+    summary = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now)
+    resolved_at = db.Column(db.DateTime(timezone=True))
+
 class ActionPlan(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
@@ -330,6 +340,7 @@ class SurveyInvite(db.Model):
     reminder_sent_at = db.Column(db.DateTime(timezone=True))
     response_token_hash = db.Column(db.String(64), default="")
     responded_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now)
     __table_args__ = (db.UniqueConstraint("survey_id", "email", name="uq_survey_invite_email"),)
 
 def log(event, detail="", actor=None):
@@ -1054,7 +1065,7 @@ def manage_surveys():
             s = Survey(title=title[:200], slug=slug[:120], description=request.form.get("description", "")[:2000],
                        target=request.form.get("target") if request.form.get("target") in ("lojista", "publico") else "lojista",
                        identity_type=("cnpj" if request.form.get("target") == "lojista" else "none"),
-                       whatsapp_mode="none")
+                       whatsapp_mode="none", automatic_reminders=False, reminder_delay_days=3)
             db.session.add(s)
             log("survey_create", slug)
             db.session.commit()
@@ -1240,6 +1251,10 @@ def edit_survey(sid):
                 identity_type = request.form.get("identity_type") if request.form.get("identity_type") in ("none", "cpf", "cnpj") else survey.identity_type
                 whatsapp_mode = request.form.get("whatsapp_mode") if request.form.get("whatsapp_mode") in ("none", "optional", "required") else survey.whatsapp_mode
                 response_limit = request.form.get("response_limit", "none")
+                reminder_delay_days = int(request.form.get("reminder_delay_days", "3"))
+                automatic_reminders = request.form.get("automatic_reminders") == "on"
+                if not 1 <= reminder_delay_days <= 30:
+                    raise ValueError("Escolha o prazo de lembrete entre 1 e 30 dias.")
                 if starts_at and ends_at and starts_at >= ends_at:
                     raise ValueError("A data de encerramento precisa ser posterior à data de início.")
                 if response_limit not in ("none", "document", "merchant"):
@@ -1254,6 +1269,7 @@ def edit_survey(sid):
                 before = {
                     "title": survey.title, "description": survey.description or "", "target": survey.target,
                     "active": survey.active, "identity_type": survey.identity_type, "whatsapp_mode": survey.whatsapp_mode, "response_limit": survey.response_limit,
+                    "automatic_reminders": survey.automatic_reminders, "reminder_delay_days": survey.reminder_delay_days,
                     "shuffle_questions": survey.shuffle_questions, "starts_at": survey.starts_at, "ends_at": survey.ends_at,
                 }
                 survey.title = request.form.get("title", survey.title)[:200]
@@ -1263,6 +1279,8 @@ def edit_survey(sid):
                 survey.identity_type = identity_type
                 survey.whatsapp_mode = whatsapp_mode
                 survey.response_limit = response_limit
+                survey.automatic_reminders = automatic_reminders
+                survey.reminder_delay_days = reminder_delay_days
                 survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
                 survey.starts_at, survey.ends_at = starts_at, ends_at
                 changed = [field for field, old_value in before.items() if old_value != getattr(survey, field)]
@@ -1425,7 +1443,7 @@ def remind_survey_invites(sid):
     if not settings["host"]:
         flash("Configure o SMTP antes de enviar lembretes.", "error")
         return redirect(url_for("edit_survey", sid=sid))
-    pending = SurveyInvite.query.filter_by(survey_id=sid, reminder_sent_at=None).limit(1000).all()
+    pending = SurveyInvite.query.filter_by(survey_id=sid, reminder_sent_at=None, responded_at=None).limit(1000).all()
     sent = 0
     try:
         with smtplib.SMTP(settings["host"], int(settings["port"]), timeout=12) as smtp:
@@ -1449,7 +1467,7 @@ def remind_survey_invites(sid):
         flash(str(sent) + " lembrete(s) enviado(s).", "success")
     except Exception:
         db.session.commit()
-        app.logger.exception("Falha no envio de lembretes")
+        record_system_incident("smtp", "Falha no envio de lembretes manuais.")
         flash(str(sent) + " lembrete(s) enviado(s); houve falha no restante. Os pendentes podem ser reenviados.", "error")
     return redirect(url_for("edit_survey", sid=sid))
 
@@ -1648,6 +1666,43 @@ def identities():
 def audit():
     logs = Audit.query.order_by(Audit.id.desc()).limit(500).all()
     return render_template("audit.html", logs=logs)
+
+@app.get("/admin/system-health")
+@roles("master")
+def system_health():
+    database_ok = False
+    smtp_configured = False
+    alert_email_configured = False
+    incidents = []
+    try:
+        db.session.execute(text("SELECT 1")).scalar_one()
+        database_ok = True
+        incidents = SystemIncident.query.order_by(SystemIncident.resolved_at.is_(None).desc(),
+            SystemIncident.created_at.desc()).limit(100).all()
+        smtp = effective_smtp_settings()
+        smtp_configured = bool(smtp["host"])
+        alert_email_configured = bool(smtp.get("master_alert_email"))
+    except Exception:
+        db.session.rollback()
+        app.logger.warning("Falha ao consultar o estado do sistema.")
+    return render_template("system_health.html", database_ok=database_ok,
+        smtp_configured=smtp_configured, alert_email_configured=alert_email_configured,
+        incidents=incidents), (200 if database_ok else 503)
+
+@app.post("/admin/system-health/incidents/<int:incident_id>/resolve")
+@roles("master")
+def resolve_system_incident(incident_id):
+    incident = db.get_or_404(SystemIncident, incident_id)
+    incident.resolved_at = now()
+    log("system_incident_resolved", "incident:%s component:%s" % (incident.id, incident.component))
+    db.session.commit()
+    flash("Ocorrência marcada como resolvida.", "success")
+    return redirect(url_for("system_health"))
+
+@app.errorhandler(500)
+def handle_internal_error(error):
+    record_system_incident("application", "A aplicação registrou um erro interno (HTTP 500).")
+    return render_template("server_error.html"), 500
 
 @app.route("/p/<slug>", methods=["GET", "POST"])
 @limiter.limit("40 per hour")
@@ -1851,6 +1906,7 @@ def effective_smtp_settings():
         "tls": (config.tls if config else os.environ.get("SMTP_TLS", "1") == "1"),
         "username": (config.username if config and config.username else os.environ.get("SMTP_USER", "")),
         "from_address": (config.from_address if config and config.from_address else os.environ.get("SMTP_FROM", "")),
+        "master_alert_email": ((config.master_alert_email if config else "") or os.environ.get("MASTER_ALERT_EMAIL", "")),
         "password": os.environ.get("SMTP_PASSWORD", ""),
     }
     if config and config.password_encrypted:
@@ -1861,21 +1917,103 @@ def effective_smtp_settings():
             result["password"] = ""
     return result
 
+def send_smtp_message(settings, message):
+    with smtplib.SMTP(settings["host"], int(settings["port"]), timeout=12) as smtp:
+        if settings["tls"]:
+            smtp.starttls()
+        if settings["username"]:
+            smtp.login(settings["username"], settings["password"])
+        smtp.send_message(message)
+
+def notify_master_incident(incident):
+    config = SMTPConfig.query.order_by(SMTPConfig.id).first()
+    recipient = ((config.master_alert_email if config else "") or os.environ.get("MASTER_ALERT_EMAIL", "")).strip()
+    settings = effective_smtp_settings()
+    if not recipient or not settings["host"]:
+        return
+    msg = EmailMessage()
+    msg["Subject"] = "Alerta do sistema de pesquisas"
+    msg["From"] = settings["from_address"] or "pesquisa@example.invalid"
+    msg["To"] = recipient
+    msg.set_content("O sistema registrou uma ocorrência em " + incident.component + ".\n\n"
+        + incident.summary + "\n\nAcesse a área Saúde do sistema no painel para verificar o status.")
+    try:
+        send_smtp_message(settings, msg)
+    except Exception:
+        app.logger.warning("Não foi possível enviar a notificação de incidente ao Master.")
+
+def record_system_incident(component, summary, notify=True):
+    try:
+        existing = SystemIncident.query.filter_by(component=component, resolved_at=None).first()
+        if existing:
+            return existing
+        incident = SystemIncident(component=component[:40], summary=summary[:255])
+        db.session.add(incident)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        app.logger.error("Não foi possível registrar uma ocorrência de sistema.")
+        return None
+    if notify:
+        notify_master_incident(incident)
+    return incident
+
+def resolve_system_incidents(component):
+    SystemIncident.query.filter_by(component=component, resolved_at=None).update(
+        {SystemIncident.resolved_at: now()}, synchronize_session=False)
+
 @app.route("/admin/settings/smtp", methods=["GET", "POST"])
 @roles("master")
 def smtp_settings():
     config = SMTPConfig.query.order_by(SMTPConfig.id).first()
+    test_recipient = ""
     if request.method == "POST":
+        action = request.form.get("action", "save")
+        if action == "test":
+            test_recipient = request.form.get("test_recipient", "").strip().lower()
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", test_recipient) or len(test_recipient) > 255:
+                flash("Informe um e-mail válido para receber o teste.", "error")
+            else:
+                settings = effective_smtp_settings()
+                if not settings["host"]:
+                    flash("Salve a configuração SMTP antes de testar o envio.", "error")
+                else:
+                    msg = EmailMessage()
+                    msg["Subject"] = "Teste de envio SMTP — Pesquisa Shopping Carpina"
+                    msg["From"] = settings["from_address"] or "pesquisa@example.invalid"
+                    msg["To"] = test_recipient
+                    msg.set_content("Este é um teste de envio SMTP da aplicação de pesquisas do Shopping Carpina. Nenhuma resposta de pesquisa foi incluída.")
+                    try:
+                        send_smtp_message(settings, msg)
+                        resolve_system_incidents("smtp")
+                        log("smtp_test_success", "test_email_sent")
+                        db.session.commit()
+                        flash("E-mail de teste enviado. Confira a caixa de entrada e o spam.", "success")
+                    except Exception:
+                        db.session.rollback()
+                        record_system_incident("smtp", "Falha no teste de envio SMTP.")
+                        flash("Falha ao enviar o teste SMTP. Confira servidor, porta, TLS e autenticação; nenhum segredo foi exibido.", "error")
+            return render_template("smtp_settings.html", settings=smtp_form_values(config),
+                password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")),
+                test_recipient=test_recipient)
+        if action != "save":
+            abort(400)
         host = request.form.get("host", "").strip()
         from_address = request.form.get("from_address", "").strip()
         username = request.form.get("username", "").strip()
+        master_alert_email = request.form.get("master_alert_email", "").strip().lower()
+        if master_alert_email and (not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", master_alert_email) or len(master_alert_email) > 255):
+            flash("Informe um e-mail válido para alertas do Master.", "error")
+            return render_template("smtp_settings.html", settings=smtp_form_values(config),
+                password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")))
         try:
             port = int(request.form.get("port", "587"))
             if not 1 <= port <= 65535:
                 raise ValueError()
         except (TypeError, ValueError):
             flash("Informe uma porta SMTP entre 1 e 65535.", "error")
-            return render_template("smtp_settings.html", settings=smtp_form_values(config), password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")))
+            return render_template("smtp_settings.html", settings=smtp_form_values(config),
+                password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")))
         if not config:
             config = SMTPConfig()
             db.session.add(config)
@@ -1884,6 +2022,7 @@ def smtp_settings():
         config.tls = request.form.get("tls") == "on"
         config.username = username[:255]
         config.from_address = from_address[:255]
+        config.master_alert_email = master_alert_email[:255]
         config.updated_at = now()
         new_password = request.form.get("password", "")
         if request.form.get("clear_password") == "on":
@@ -1894,7 +2033,9 @@ def smtp_settings():
         db.session.commit()
         flash("Configuração SMTP salva.", "success")
         config = SMTPConfig.query.order_by(SMTPConfig.id).first()
-    return render_template("smtp_settings.html", settings=smtp_form_values(config), password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")))
+    return render_template("smtp_settings.html", settings=smtp_form_values(config),
+        password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")),
+        test_recipient=test_recipient)
 
 def smtp_form_values(config):
     return {
@@ -1903,6 +2044,7 @@ def smtp_form_values(config):
         "tls": config.tls if config else os.environ.get("SMTP_TLS", "1") == "1",
         "username": config.username if config and config.username else os.environ.get("SMTP_USER", ""),
         "from_address": config.from_address if config and config.from_address else os.environ.get("SMTP_FROM", ""),
+        "master_alert_email": (config.master_alert_email if config and config.master_alert_email else os.environ.get("MASTER_ALERT_EMAIL", "")),
     }
 
 @app.route("/admin/reports/schedules", methods=["GET", "POST"])
@@ -2036,12 +2178,67 @@ def deliver_scheduled_report(schedule, run_at):
                 smtp.login(settings["username"], settings["password"])
             smtp.send_message(message)
     except Exception:
-        app.logger.exception("Falha ao entregar relatório agendado de pesquisas")
+        record_system_incident("smtp", "Falha no envio de relatório agendado.")
         return False
     schedule.last_sent_period = period_key
     log("report_schedule_sent", "schedule:%s period:%s" % (schedule.id, period_key), actor="sistema")
     db.session.commit()
     return True
+
+def public_invite_url(survey, token):
+    path = url_for("public_survey", slug=survey.slug, invite=token)
+    if has_request_context():
+        return url_for("public_survey", slug=survey.slug, invite=token, _external=True)
+    base_url = (os.environ.get("PUBLIC_BASE_URL") or "https://nps.shoppingcarpina.com.br").rstrip("/")
+    return base_url + path
+
+def send_due_invite_reminders(run_at=None, batch_limit=100):
+    run_at = run_at or now()
+    sent = 0
+    surveys = Survey.query.filter_by(active=True, automatic_reminders=True).all()
+    eligible = []
+    for survey in surveys:
+        if not survey_is_open(survey):
+            continue
+        cutoff = run_at - timedelta(days=survey.reminder_delay_days or 3)
+        due = (SurveyInvite.query.filter_by(survey_id=survey.id, reminder_sent_at=None, responded_at=None)
+            .filter(SurveyInvite.created_at <= cutoff).order_by(SurveyInvite.id).limit(batch_limit).all())
+        if due:
+            eligible.append((survey, due))
+    if not eligible:
+        return 0
+    settings = effective_smtp_settings()
+    if not settings["host"]:
+        record_system_incident("smtp", "Lembretes automáticos aguardam configuração SMTP.")
+        return 0
+    try:
+        with smtplib.SMTP(settings["host"], int(settings["port"]), timeout=12) as smtp:
+            if settings["tls"]:
+                smtp.starttls()
+            if settings["username"]:
+                smtp.login(settings["username"], settings["password"])
+            for survey, invites in eligible:
+                for invite in invites:
+                    token = secrets.token_urlsafe(32)
+                    msg = EmailMessage()
+                    msg["Subject"] = "Lembrete: pesquisa de satisfação — " + survey.title
+                    msg["From"] = settings["from_address"] or "pesquisa@example.invalid"
+                    msg["To"] = invite.email
+                    msg.set_content("A pesquisa de satisfação está aberta. Responda pelo link individual: "
+                        + public_invite_url(survey, token)
+                        + "\n\nOs dados de identificação não são vinculados às respostas individuais. "
+                        + "O sistema registra apenas se este convite recebeu resposta, sem associar o e-mail às respostas.")
+                    smtp.send_message(msg)
+                    invite.response_token_hash = hashlib.sha256(token.encode()).hexdigest()
+                    invite.reminder_sent_at = now()
+                    db.session.commit()
+                    sent += 1
+        resolve_system_incidents("smtp")
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        record_system_incident("smtp", "Falha no envio dos lembretes automáticos.")
+    return sent
 
 @app.cli.command("send-scheduled-reports")
 def send_scheduled_reports_command():
@@ -2060,7 +2257,8 @@ def send_scheduled_reports_command():
             if schedule.last_sent_period == key:
                 continue
             sent += int(deliver_scheduled_report(schedule, run_at))
-    click_echo = "Relatórios enviados: %d" % sent
+    reminders_sent = send_due_invite_reminders(run_at.astimezone(timezone.utc))
+    click_echo = "Relatórios enviados: %d; lembretes automáticos enviados: %d" % (sent, reminders_sent)
     print(click_echo)
 
 def send_receipt(resp, survey, questions, answers, email):
@@ -2081,9 +2279,10 @@ def send_receipt(resp, survey, questions, answers, email):
             if settings["username"]:
                 smtp.login(settings["username"], settings["password"])
             smtp.send_message(msg)
+        resolve_system_incidents("smtp")
         return True
     except Exception:
-        app.logger.exception("Falha ao enviar recibo de pesquisa")
+        record_system_incident("smtp", "Falha no envio de recibo de pesquisa.")
         return False
 
 
@@ -2101,6 +2300,8 @@ def ensure_schema():
             additions = {
             "survey": {
                 "identity_type": "VARCHAR(8) NOT NULL DEFAULT 'none'",
+                "automatic_reminders": "BOOLEAN NOT NULL DEFAULT FALSE",
+                "reminder_delay_days": "INTEGER NOT NULL DEFAULT 3",
                 "whatsapp_mode": "VARCHAR(12) NOT NULL DEFAULT 'none'",
                 "shuffle_questions": "BOOLEAN NOT NULL DEFAULT FALSE",
                 "starts_at": "TIMESTAMP WITH TIME ZONE",
@@ -2110,6 +2311,10 @@ def ensure_schema():
             "survey_invite": {
                 "response_token_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
                 "responded_at": "TIMESTAMP WITH TIME ZONE",
+                "created_at": "TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            },
+            "smtp_config": {
+                "master_alert_email": "VARCHAR(255) NOT NULL DEFAULT ''",
             },
             "response": {
                 "device_submitted_at": "TIMESTAMP WITH TIME ZONE",
