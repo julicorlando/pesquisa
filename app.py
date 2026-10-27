@@ -2201,8 +2201,10 @@ def send_due_invite_reminders(run_at=None, batch_limit=100):
         if not survey_is_open(survey):
             continue
         cutoff = run_at - timedelta(days=survey.reminder_delay_days or 3)
-        due = (SurveyInvite.query.filter_by(survey_id=survey.id, reminder_sent_at=None, responded_at=None)
-            .filter(SurveyInvite.created_at <= cutoff).order_by(SurveyInvite.id).limit(batch_limit).all())
+        pending = (SurveyInvite.query.filter_by(survey_id=survey.id, reminder_sent_at=None, responded_at=None)
+            .order_by(SurveyInvite.id).all())
+        due = [invite for invite in pending
+            if as_utc(invite.created_at) and as_utc(invite.created_at) <= cutoff][:batch_limit]
         if due:
             eligible.append((survey, due))
     if not eligible:
