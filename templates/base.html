@@ -25,8 +25,9 @@
           <a href="{{ url_for('users') }}">Usuários</a>
           <a href="{{ url_for('admin_responses') }}">Respostas antigas</a>
           <a href="{{ url_for('identities') }}">Identificações</a>
-          <a href="{{ url_for('open_answers') }}">Respostas abertas</a>
+          <a href="{{ url_for('smtp_settings') }}">Configuração SMTP</a>
         {% endif %}
+        <a href="{{ url_for('open_answers') }}">Respostas abertas e escolhas</a>
         {% if current_user.role in ('master','auditoria') %}
           <a href="{{ url_for('audit') }}">Auditoria</a>
         {% endif %}
