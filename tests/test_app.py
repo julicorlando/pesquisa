@@ -104,6 +104,30 @@ def test_conditional_question_can_be_skipped_server_side(client):
         assert Response.query.filter_by(survey_id=1).count() == 1
         assert Answer.query.count() == 1
 
+def test_optional_question_can_be_left_blank(client):
+    with app.app_context():
+        db.session.add(User(username="author", password_hash=generate_password_hash("long-test-pass"), role="auditoria"))
+        survey=Survey(title="Opcional",slug="optional",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        db.session.add(Question(survey_id=survey.id,sector="Geral",text="Obrigatória",position=1))
+        db.session.commit()
+    signin(client,"author","long-test-pass")
+    edit=client.post("/admin/surveys/1",data={"kind":"question","sector":"Geral","text":"Opcional","answer_type":"open","optional":"on"})
+    assert edit.status_code == 302
+    with app.app_context():
+        assert Question.query.filter_by(text="Opcional").first().optional is True
+    assert b"Pergunta opcional" in client.get("/admin/surveys/1").data
+    client.post("/p/optional",data={"stage":"identity"})
+    page=client.get("/p/optional/responder")
+    assert b"data-optional=\"true\"" in page.data
+    assert b"Opcional" in page.data
+    response=client.post("/p/optional/responder",data={"q_1":"4","confirm":"yes"})
+    assert response.status_code == 200
+    with app.app_context():
+        assert Response.query.filter_by(survey_id=1).count() == 1
+        assert Answer.query.count() == 1
+        assert Answer.query.first().question_id == 1
+
 def test_action_plan_and_qr_code_routes(client):
     with app.app_context():
         db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))

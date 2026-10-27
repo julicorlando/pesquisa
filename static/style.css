@@ -281,3 +281,4 @@ th { background: var(--navy); color: #fff; }
   .question-summary strong { font-size: 15px; }
   .question-editor { padding: 0 16px 16px; }
 }
+.optional-tag { display: inline-block; margin-left: 8px; padding: 4px 8px; border-radius: 999px; background: #E8F3F0; color: var(--teal-dark); font-size: 12px; vertical-align: middle; }

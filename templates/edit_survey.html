@@ -32,6 +32,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="question">
     <label>Setor<select name="sector">{% for item in sectors %}<option>{{ item }}</option>{% endfor %}</select></label>
     <label>Enunciado<textarea name="text" required maxlength="1000"></textarea></label>
+    <label class="check"><input type="checkbox" name="optional"> Pergunta opcional (pode avançar sem responder)</label>
     <label>Tipo de resposta<select name="answer_type"><option value="rating">Avaliação de 1 a 5</option><option value="nps">NPS de 0 a 10</option><option value="open">Resposta aberta (até 5.000 caracteres)</option><option value="single">Múltipla escolha (uma opção)</option><option value="multiple">Múltipla escolha (uma ou mais opções)</option></select></label>
     <label>Ramificação condicional (opcional)<select name="branch_question_id"><option value="">Sempre exibir</option>{% for parent in survey.questions if parent.active and parent.answer_type in ('rating','nps','single') %}<option value="{{ parent.id }}">Após: {{ parent.text }}</option>{% endfor %}</select></label>
     <label>Exibir quando a resposta anterior for exatamente<input name="branch_value" maxlength="255" placeholder="Ex.: 1, 10 ou Sim"></label>
@@ -42,7 +43,7 @@
 </div>
 <div class="card">
   <h2>Importar ou exportar perguntas (CSV)</h2>
-  <p>Baixe o modelo aceito, preencha os campos e importe o arquivo. Use CSV UTF-8 com separador ponto e vírgula. Tipos aceitos: <code>rating</code>, <code>nps</code>, <code>open</code>, <code>single</code> e <code>multiple</code>. Para múltipla escolha, separe as opções com <code>|</code>. A importação valida tudo antes de salvar e mantém as perguntas que já existem.</p>
+  <p>Baixe o modelo aceito, preencha os campos e importe o arquivo. Use CSV UTF-8 com separador ponto e vírgula. Tipos aceitos: <code>rating</code>, <code>nps</code>, <code>open</code>, <code>single</code> e <code>multiple</code>. Para múltipla escolha, separe as opções com <code>|</code>. Na coluna <code>obrigatoria</code>, use <code>sim</code> ou <code>nao</code>. A importação valida tudo antes de salvar e mantém as perguntas que já existem.</p>
   <p><a class="btn secondary" href="{{ url_for('questions_csv_model') }}">Baixar modelo CSV</a> <a class="btn secondary" href="{{ url_for('export_survey_questions', sid=survey.id) }}">Exportar perguntas desta pesquisa</a></p>
   <form method="post" enctype="multipart/form-data" action="{{ url_for('import_survey_questions', sid=survey.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -62,6 +63,7 @@
     <form method="post" class="question-editor">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="edit_question"><input type="hidden" name="question_id" value="{{ q.id }}">
       <label>Enunciado<textarea name="text" required maxlength="1000">{{ q.text }}</textarea></label>
+      <label class="check"><input type="checkbox" name="optional" {% if q.optional %}checked{% endif %}> Pergunta opcional (pode avançar sem responder)</label>
       <label>Tipo de resposta<select name="answer_type"><option value="rating" {% if q.answer_type=='rating' %}selected{% endif %}>Avaliação de 1 a 5</option><option value="nps" {% if q.answer_type=='nps' %}selected{% endif %}>NPS de 0 a 10</option><option value="open" {% if q.answer_type=='open' %}selected{% endif %}>Resposta aberta (até 5.000 caracteres)</option><option value="single" {% if q.answer_type=='single' %}selected{% endif %}>Múltipla escolha (uma opção)</option><option value="multiple" {% if q.answer_type=='multiple' %}selected{% endif %}>Múltipla escolha (uma ou mais opções)</option></select></label>
       <label>Opções (uma por linha; 2 a 20)<textarea name="choices" rows="5">{{ q.choice_options|join('\n') }}</textarea></label>
       <label>Aviso para quem responder<textarea name="notice" maxlength="500">{{ q.notice or '' }}</textarea></label>

@@ -146,6 +146,7 @@ class Question(db.Model):
     text = db.Column(db.Text, nullable=False)
     position = db.Column(db.Integer, default=0)
     active = db.Column(db.Boolean, default=True)
+    optional = db.Column(db.Boolean, nullable=False, default=False)
     answer_type = db.Column(db.String(20), nullable=False, default="rating")
     notice = db.Column(db.Text, default="")
     choices = db.Column(db.Text, nullable=False, default="[]")
@@ -482,7 +483,7 @@ def csv_import_value(value):
 def questions_csv_response(filename, rows):
     output = io.StringIO(newline="")
     writer = csv.writer(output, delimiter=";", lineterminator="\r\n")
-    writer.writerow(["setor", "enunciado", "tipo_resposta", "opcoes", "aviso"])
+    writer.writerow(["setor", "enunciado", "tipo_resposta", "opcoes", "aviso", "obrigatoria"])
     for row in rows:
         writer.writerow([csv_export_value(value) for value in row])
     data = ("\ufeff" + output.getvalue()).encode("utf-8")
@@ -498,7 +499,7 @@ def questions_csv_model():
 def export_survey_questions(sid):
     survey = db.get_or_404(Survey, sid)
     rows = [
-        (q.sector, q.text, q.answer_type, "|".join(q.choice_options), q.notice or "")
+        (q.sector, q.text, q.answer_type, "|".join(q.choice_options), q.notice or "", "nao" if q.optional else "sim")
         for q in Question.query.filter_by(survey_id=sid).order_by(Question.position).all()
     ]
     return questions_csv_response("perguntas_" + survey.slug + ".csv", rows)
@@ -551,7 +552,11 @@ def import_survey_questions(sid):
             if issues:
                 errors.append("Linha " + str(row_number) + ": " + "; ".join(issues))
             else:
-                prepared.append((sector, statement, answer_type, choices, notice))
+                required_flag = (row.get("obrigatoria") or "sim").strip().casefold()
+                if required_flag not in ("sim", "nao", "true", "false", "1", "0"):
+                    errors.append("Linha " + str(row_number) + ": obrigatoria deve ser sim ou nao")
+                else:
+                    prepared.append((sector, statement, answer_type, choices, notice, required_flag not in ("nao", "false", "0")))
         if errors:
             flash("CSV não importado: " + " | ".join(errors[:10]), "error")
         elif not prepared:
@@ -559,8 +564,8 @@ def import_survey_questions(sid):
         else:
             position = len(survey.questions)
             for offset, item in enumerate(prepared, start=1):
-                sector, statement, answer_type, choices, notice = item
-                db.session.add(Question(survey_id=sid, sector=sector, text=statement, position=position + offset, active=True, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False)))
+                sector, statement, answer_type, choices, notice, required = item
+                db.session.add(Question(survey_id=sid, sector=sector, text=statement, position=position + offset, active=True, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), optional=not required))
             log("questions_csv_import", str(sid) + ":" + str(len(prepared)))
             db.session.commit()
             flash(str(len(prepared)) + " pergunta(s) importada(s) e salva(s). As perguntas existentes foram mantidas.", "success")
@@ -605,7 +610,7 @@ def edit_survey(sid):
             elif answer_type in ("single", "multiple") and choices is None:
                 flash("Informe de 2 a 20 opções exclusivas, uma por linha, com até 200 caracteres cada.", "error")
             elif sector in SECTORS and text:
-                db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), branch_question_id=branch_parent.id if branch_parent else None, branch_value=branch_value if branch_parent else ""))
+                db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), branch_question_id=branch_parent.id if branch_parent else None, branch_value=branch_value if branch_parent else "", optional=request.form.get("optional") == "on"))
                 log("question_create", str(sid))
                 flash("Pergunta adicionada e salva automaticamente.", "success")
         elif kind == "move_question":
@@ -632,6 +637,7 @@ def edit_survey(sid):
             else:
                 q.text = request.form.get("text", q.text)[:1000]
                 q.active = request.form.get("active") == "on"
+                q.optional = request.form.get("optional") == "on"
                 q.notice = request.form.get("notice", "").strip()[:500]
                 if request.form.get("answer_type") in ("rating", "nps", "open", "single", "multiple"):
                     new_type = request.form.get("answer_type")
@@ -1035,8 +1041,11 @@ def answer_survey(slug):
                 parent_value = request.form.get("q_" + str(q.branch_question_id), "").strip()
                 if parent_value != q.branch_value:
                     continue
+            selected = request.form.getlist("q_" + str(q.id)) if q.answer_type in ("single", "multiple") else []
+            is_blank = (not selected) if q.answer_type in ("single", "multiple") else (not raw)
+            if q.optional and is_blank:
+                continue
             if q.answer_type in ("single", "multiple"):
-                selected = request.form.getlist("q_" + str(q.id))
                 options = q.choice_options
                 if (q.answer_type == "single" and len(selected) != 1) or (q.answer_type == "multiple" and not selected) or any(value not in options for value in selected):
                     flash("Selecione uma ou mais opções válidas para continuar.", "error")
@@ -1195,6 +1204,7 @@ def ensure_schema():
             },
             "question": {
                 "answer_type": "VARCHAR(20) NOT NULL DEFAULT 'rating'",
+                "optional": "BOOLEAN NOT NULL DEFAULT FALSE",
                 "notice": "TEXT NOT NULL DEFAULT ''",
             "choices": "TEXT NOT NULL DEFAULT '[]'",
             "branch_question_id": "INTEGER",
