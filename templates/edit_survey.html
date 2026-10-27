@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Editar: {{ survey.title }}</h1>
+<div class="card review-checklist" aria-live="polite" aria-atomic="true">
+  <h2>Revisão antes de publicar</h2>
+  {% if publish_review %}<ul>{% for warning in publish_review %}<li>{{ warning }}</li>{% endfor %}</ul>
+  {% else %}<p>Não encontramos alertas de clareza ou perguntas repetidas. Confira o conteúdo e publique quando estiver pronto.</p>{% endif %}
+</div>
 <div class="card">
   <h2>Divulgação e acompanhamento</h2>
   <p><strong>{{ response_count }}</strong> respostas registradas · Link público: <a href="{{ url_for('public_survey', slug=survey.slug, _external=True) }}" target="_blank">abrir pesquisa</a></p>
@@ -65,7 +70,7 @@
   <details class="card question-card" data-question-id="{{ q.id }}">
     <summary class="question-summary">
       <span><small>{{ q.sector }} · <span class="question-position">posição {{ loop.index }}</span></small><strong>{{ q.text }}</strong></span>
-      <button type="button" class="drag-handle" draggable="true" aria-label="Arraste para reordenar" title="Arraste para reordenar">⠿</button>
+      <span class="question-reorder"><button type="button" class="drag-handle" draggable="true" aria-label="Arraste para reordenar">⠿</button><button type="button" class="move-question-up" aria-label="Mover pergunta para cima">↑</button><button type="button" class="move-question-down" aria-label="Mover pergunta para baixo">↓</button></span>
     </summary>
     <form method="post" class="question-editor">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="edit_question"><input type="hidden" name="question_id" value="{{ q.id }}">
@@ -93,6 +98,7 @@
   if(!list)return;
   let dragged=null;
   const csrf=list.dataset.csrf;
+  const announce=document.createElement("div"); announce.className="sr-only"; announce.setAttribute("role","status"); announce.setAttribute("aria-live","polite"); list.before(announce);
   const cards=()=>Array.from(list.querySelectorAll('.question-card'));
   function refreshPositions(){cards().forEach((card,i)=>{const el=card.querySelector('.question-position');if(el)el.textContent='posição '+(i+1);});}
   async function saveOrder(){
@@ -101,9 +107,18 @@
       const response=await fetch(list.dataset.reorderUrl,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRFToken':csrf},body:JSON.stringify({order})});
       if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data.error||'Não foi possível salvar a nova ordem.');}
       refreshPositions();
+      announce.textContent="Ordem das perguntas salva.";
     }catch(error){alert(error.message);window.location.reload();}
   }
   cards().forEach(card=>{
+    card.querySelector('.move-question-up')?.addEventListener('click',async()=>{
+      const previous=card.previousElementSibling;
+      if(previous){list.insertBefore(card,previous);refreshPositions();await saveOrder();card.querySelector('.move-question-up').focus();}
+    });
+    card.querySelector('.move-question-down')?.addEventListener('click',async()=>{
+      const next=card.nextElementSibling;
+      if(next){list.insertBefore(next,card);refreshPositions();await saveOrder();card.querySelector('.move-question-down').focus();}
+    });
     const handle=card.querySelector('.drag-handle');
     handle.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();});
     handle.addEventListener('dragstart',event=>{

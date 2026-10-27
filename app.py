@@ -289,7 +289,22 @@ class ActionPlan(db.Model):
     priority = db.Column(db.String(10), default="media")
     status = db.Column(db.String(20), default="aberto")
     due_date = db.Column(db.Date)
+    baseline_average = db.Column(db.Float)
+    reviewed_average = db.Column(db.Float)
+    reviewed_at = db.Column(db.DateTime(timezone=True))
+    review_notes = db.Column(db.Text, default="")
     created_at = db.Column(db.DateTime(timezone=True), default=now)
+
+class ParticipantFollowup(db.Model):
+    """Solicitações de retorno, isoladas e sem referência à resposta individual."""
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
+    email = db.Column(db.String(255), nullable=False, default="")
+    whatsapp = db.Column(db.String(20), nullable=False, default="")
+    topic = db.Column(db.String(1000), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default="pendente")
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now)
+    contacted_at = db.Column(db.DateTime(timezone=True))
 
 class SurveyAlert(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -704,6 +719,39 @@ def make_xlsx(sheets):
     output.seek(0)
     return output
 
+@app.route("/admin/followups", methods=["GET", "POST"])
+@roles("master")
+def participant_followups():
+    if request.method == "POST":
+        item = db.get_or_404(ParticipantFollowup, request.form.get("followup_id", type=int))
+        item.status = "contatado"
+        item.contacted_at = now()
+        log("participant_followup_contacted", "followup:%s" % item.id)
+        db.session.commit()
+        flash("Solicitação marcada como contatada.", "success")
+        return redirect(url_for("participant_followups"))
+    records = ParticipantFollowup.query.order_by(ParticipantFollowup.created_at.desc()).limit(500).all()
+    survey_titles = {item.id: item.title for item in Survey.query.all()}
+    return render_template("participant_followups.html", records=records, survey_titles=survey_titles)
+
+
+@app.get("/api/participation")
+@login_required
+def participation_api():
+    accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
+    surveys = Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all() if accessible else []
+    result = []
+    for survey in surveys:
+        tracked = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.reminder_sent_at.isnot(None)).count()
+        completed = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.responded_at.isnot(None)).count()
+        responses = Response.query.filter_by(survey_id=survey.id).count()
+        result.append({"id": survey.id, "title": survey.title, "responses": responses, "invited": tracked,
+            "completed": completed, "rate": round(completed / tracked * 100, 1) if tracked else 0})
+    return jsonify({"surveys": result})
+
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
@@ -996,6 +1044,17 @@ def export_dashboard_pdf():
 @login_required
 def action_plans():
     accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
+    if request.method == "POST" and request.form.get("action") == "review":
+        plan = db.get_or_404(ActionPlan, request.form.get("plan_id", type=int))
+        if plan.sector not in accessible:
+            abort(403)
+        plan.reviewed_average = sector_rating_average(plan.survey_id, plan.sector)
+        plan.reviewed_at = now()
+        plan.review_notes = request.form.get("review_notes", "").strip()[:2000]
+        log("action_plan_review", "plan:%s" % plan.id)
+        db.session.commit()
+        flash("Revisão registrada com a média atual do setor.", "success")
+        return redirect(url_for("action_plans"))
     if request.method == "POST":
         plan_id = request.form.get("plan_id", type=int)
         plan = db.get_or_404(ActionPlan, plan_id) if plan_id else ActionPlan()
@@ -1016,6 +1075,8 @@ def action_plans():
         plan.title = request.form.get("title", "").strip()[:200]
         plan.description = request.form.get("description", "").strip()[:2000]
         plan.owner = request.form.get("owner", "").strip()[:120]
+        if not plan_id and plan.baseline_average is None:
+            plan.baseline_average = sector_rating_average(plan.survey_id, sector)
         plan.priority = request.form.get("priority") if request.form.get("priority") in ("baixa", "media", "alta") else "media"
         plan.status = request.form.get("status") if request.form.get("status") in ("aberto", "andamento", "concluido") else "aberto"
         try:
@@ -1237,6 +1298,36 @@ def import_survey_questions(sid):
         flash("Não foi possível importar o CSV: " + str(exc)[:300], "error")
     return redirect(url_for("edit_survey", sid=sid))
 
+def survey_publish_review(survey):
+    questions = Question.query.filter_by(survey_id=survey.id, active=True).order_by(Question.position).all()
+    warnings = []
+    normalized = {}
+    for question in questions:
+        key = re.sub(r"[^a-z0-9]+", " ", unicodedata.normalize("NFKD", question.text.lower()).encode("ascii", "ignore").decode()).strip()
+        normalized.setdefault(key, []).append(question)
+    for group in (group for group in normalized.values() if len(group) > 1):
+        warnings.append("Pergunta repetida: " + group[0].text[:120])
+    vague_terms = ("outros", "etc", "bom?", "ruim?", "avalie", "o que acha")
+    for question in questions:
+        text_value = question.text.strip()
+        if len(text_value.split()) < 3 or any(term in text_value.lower() for term in vague_terms):
+            warnings.append("Revise se esta pergunta está clara: " + text_value[:120])
+    required = [question for question in questions if not question.optional]
+    if len(required) >= 10 and required and len(required) / max(len(questions), 1) >= 0.8:
+        warnings.append("A pesquisa tem muitas perguntas obrigatórias; considere marcar algumas como opcionais.")
+    if not questions:
+        warnings.insert(0, "Adicione ao menos uma pergunta ativa antes de publicar.")
+    return warnings
+
+
+def sector_rating_average(survey_id, sector):
+    value = (db.session.query(db.func.avg(Answer.rating))
+        .join(Question, Answer.question_id == Question.id)
+        .filter(Question.survey_id == survey_id, Question.sector == sector,
+            Question.answer_type == "rating", Answer.rating > 0).scalar())
+    return round(float(value), 2) if value is not None else None
+
+
 @app.route("/admin/surveys/<int:sid>", methods=["GET", "POST"])
 @login_required
 def edit_survey(sid):
@@ -1275,7 +1366,15 @@ def edit_survey(sid):
                 survey.title = request.form.get("title", survey.title)[:200]
                 survey.description = request.form.get("description", "")[:2000]
                 survey.target = target
-                survey.active = request.form.get("save_draft") != "yes" and request.form.get("active") == "on"
+                requested_active = request.form.get("save_draft") != "yes" and request.form.get("active") == "on"
+                if requested_active and not Question.query.filter_by(survey_id=sid, active=True).first():
+                    survey.active = False
+                    flash("A pesquisa precisa ter ao menos uma pergunta ativa antes de publicar.", "error")
+                else:
+                    survey.active = requested_active
+                    if requested_active:
+                        for warning in survey_publish_review(survey):
+                            flash(warning, "warning")
                 survey.identity_type = identity_type
                 survey.whatsapp_mode = whatsapp_mode
                 survey.response_limit = response_limit
@@ -1375,7 +1474,8 @@ def edit_survey(sid):
         invite_pending=invite_pending, response_count=response_count,
         tracked_invites=tracked_invites, tracked_responses=tracked_responses,
         participation_rate=round(tracked_responses / tracked_invites * 100, 1) if tracked_invites else 0,
-        starts_at_input=local_datetime_input(survey.starts_at), ends_at_input=local_datetime_input(survey.ends_at))
+        starts_at_input=local_datetime_input(survey.starts_at), ends_at_input=local_datetime_input(survey.ends_at),
+        publish_review=survey_publish_review(survey))
 
 @app.get("/admin/surveys/<int:sid>/qrcode.png")
 @login_required
@@ -1774,6 +1874,24 @@ def public_survey(slug):
                 if duplicate:
                     flash("Esta pesquisa já recebeu uma resposta usando este documento ou cadastro.", "error")
                     return render_template("identity.html", survey=s)
+                if request.form.get("followup_consent") == "on":
+                    followup_email = request.form.get("followup_email", "").strip().lower()[:255]
+                    followup_whatsapp = request.form.get("followup_whatsapp", "").strip()[:20]
+                    followup_digits = re.sub(r"\D", "", followup_whatsapp)
+                    valid_followup_phone = bool(re.fullmatch(r"\+?[0-9\s().-]{10,20}", followup_whatsapp) and 10 <= len(followup_digits) <= 15)
+                    followup_topic = request.form.get("followup_topic", "").strip()[:1000]
+                    if followup_email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", followup_email):
+                        flash("Informe um e-mail válido para retorno.", "error")
+                        return render_template("identity.html", survey=s)
+                    if not followup_email and not valid_followup_phone:
+                        flash("Para receber retorno, informe um e-mail ou WhatsApp válido.", "error")
+                        return render_template("identity.html", survey=s)
+                    if not followup_topic:
+                        flash("Descreva brevemente o assunto para receber retorno.", "error")
+                        return render_template("identity.html", survey=s)
+                    db.session.add(ParticipantFollowup(survey_id=s.id, email=followup_email,
+                        whatsapp=followup_whatsapp if valid_followup_phone else "", topic=followup_topic))
+
                 pending = RespondentIdentity(
                     survey_id=s.id,
                     document_type=info.get("document_type", "none"),
@@ -2316,6 +2434,12 @@ def ensure_schema():
             },
             "smtp_config": {
                 "master_alert_email": "VARCHAR(255) NOT NULL DEFAULT ''",
+            },
+            "action_plan": {
+                "baseline_average": "FLOAT",
+                "reviewed_average": "FLOAT",
+                "reviewed_at": "TIMESTAMP WITH TIME ZONE",
+                "review_notes": "TEXT NOT NULL DEFAULT ''",
             },
             "response": {
                 "device_submitted_at": "TIMESTAMP WITH TIME ZONE",

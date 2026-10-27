@@ -7,7 +7,7 @@ import app as app_module
 os.environ["SECRET_KEY"] = "test-secret-is-only-for-tests-not-production"
 os.environ["DATABASE_URL"] = "sqlite://"
 import pytest
-from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, AlertSettings, SectorGoal, ReportSchedule, SMTPConfig, SystemIncident, Question, Response, Answer, ActionPlan, RespondentIdentity, Audit, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment, send_due_invite_reminders, survey_is_open, effective_smtp_settings
+from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, AlertSettings, SectorGoal, ReportSchedule, SMTPConfig, SystemIncident, Question, Response, Answer, ActionPlan, ParticipantFollowup, RespondentIdentity, Audit, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment, send_due_invite_reminders, survey_is_open, effective_smtp_settings
 
 @pytest.fixture()
 def client():
@@ -560,3 +560,50 @@ def test_system_health_is_master_only_and_lists_incidents(client):
     page = client.get("/admin/system-health")
     assert page.status_code == 200
     assert b"Falha de teste" in page.data
+
+def test_participation_api_returns_aggregate_only(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey=Survey(title="Participação",slug="participacao",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        q=Question(survey_id=survey.id,sector="Geral",text="Avalia o serviço?",position=1)
+        db.session.add(q);db.session.flush()
+        response=Response(survey_id=survey.id)
+        db.session.add(response);db.session.flush()
+        db.session.add(Answer(response_id=response.id,question_id=q.id,rating=5))
+        db.session.commit()
+    signin(client,"master","long-test-pass")
+    response=client.get("/api/participation")
+    assert response.status_code == 200
+    body=response.get_json()
+    assert body["surveys"][0]["responses"] == 1
+    assert "answers" not in body and "email" not in body and "identity" not in body
+
+def test_followup_record_is_separate_from_response(client):
+    with app.app_context():
+        survey=Survey(title="Retorno",slug="retorno",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        db.session.add(Question(survey_id=survey.id,sector="Geral",text="Como foi sua experiência?",position=1))
+        db.session.commit()
+    page=client.post("/p/retorno",data={"stage":"identity","email":"respondente@example.com",
+        "followup_consent":"on","followup_email":"retorno@example.com","followup_topic":"Problema no estacionamento"})
+    assert page.status_code == 200
+    with app.app_context():
+        assert ParticipantFollowup.query.count() == 1
+        assert Response.query.count() == 0
+        item=ParticipantFollowup.query.first()
+        assert item.email == "retorno@example.com"
+        assert not hasattr(item,"response_id")
+
+def test_survey_review_detects_duplicates_and_vague_questions(client):
+    with app.app_context():
+        survey=Survey(title="Revisão",slug="revisao",active=False,target="publico")
+        db.session.add(survey);db.session.flush()
+        db.session.add_all([
+            Question(survey_id=survey.id,sector="Geral",text="Atendimento foi bom?",position=1),
+            Question(survey_id=survey.id,sector="Geral",text="Atendimento foi bom?",position=2),
+        ])
+        db.session.commit()
+        warnings=app_module.survey_publish_review(survey)
+        assert any("repetida" in warning.lower() for warning in warnings)
+        assert any("clara" in warning.lower() for warning in warnings)

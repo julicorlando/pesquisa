@@ -12,12 +12,43 @@
   </div>
   <button class="btn">Aplicar filtros</button> <a class="btn secondary" href="{{ url_for('dashboard') }}">Limpar</a>
 </form>
+<section class="card live-panel" aria-labelledby="participationHeading"><h2 id="participationHeading">Participação em tempo real</h2><p class="muted" id="participationUpdated" aria-live="polite">Atualizando totais a cada 30 segundos. Nenhuma resposta individual é exibida.</p><div class="cards" id="participationCards"></div></section>
 <h2>Pesquisas</h2>
 <div class="cards">
   {% for item in surveys %}
-  <article class="card"><h3>{{ item.title }}</h3><p>{{ item.description or 'Pesquisa de satisfação' }}</p><p>Convites rastreáveis: {{ participation[item.id].invited }} enviados · {{ participation[item.id].completed }} respostas · {{ participation[item.id].rate }}%</p><a class="btn{% if selected_survey==item.id %} secondary{% endif %}" href="{{ url_for('dashboard', survey=item.id, sector=selected_sector, **{'from':date_from,'to':date_to}) }}">{% if selected_survey==item.id %}Pesquisa selecionada{% else %}Ver perguntas e respostas{% endif %}</a></article>
+  <article class="card"><h3>{{ item.title }}</h3><p>{{ item.description or 'Pesquisa de satisfação' }}</p><p data-live-participation="{{ item.id }}" aria-live="polite" aria-atomic="true">Convites rastreáveis: <span data-invited>{{ participation[item.id].invited }}</span> enviados · <span data-completed>{{ participation[item.id].completed }}</span> respostas · conclusão <span data-rate>{{ participation[item.id].rate }}</span>% · total da pesquisa <span data-responses>0</span></p><a class="btn{% if selected_survey==item.id %} secondary{% endif %}" href="{{ url_for('dashboard', survey=item.id, sector=selected_sector, **{'from':date_from,'to':date_to}) }}">{% if selected_survey==item.id %}Pesquisa selecionada{% else %}Ver perguntas e respostas{% endif %}</a></article>
   {% else %}<div class="card">Não há pesquisas para os setores do seu perfil.</div>{% endfor %}
 </div>
+<script>
+(() => {
+  const update = async () => {
+    try {
+      const response = await fetch("{{ url_for('participation_api') }}", {headers: {"Accept": "application/json"}});
+      if (!response.ok) return;
+      const data = await response.json();
+      const live = document.getElementById("participationCards");
+      live.replaceChildren();
+      for (const item of data.surveys || []) {
+        const card = document.createElement("article"); card.className = "card";
+        const title = document.createElement("h3"); title.textContent = item.title;
+        const totals = document.createElement("p"); totals.textContent = item.responses + " resposta(s) registradas";
+        const tracked = document.createElement("p"); tracked.textContent = item.invited + " convite(s) rastreáveis · " + item.completed + " concluído(s) · " + item.rate + "% de conclusão";
+        card.append(title, totals, tracked); live.append(card);
+      }
+      document.getElementById("participationUpdated").textContent = "Totais atualizados em " + new Date().toLocaleTimeString("pt-BR") + ". Nenhuma resposta individual é exibida.";
+      for (const item of data.surveys || []) {
+        const card = document.querySelector('[data-live-participation="' + item.id + '"]');
+        if (!card) continue;
+        card.querySelector("[data-invited]").textContent = item.invited;
+        card.querySelector("[data-completed]").textContent = item.completed;
+        card.querySelector("[data-rate]").textContent = item.rate;
+        card.querySelector("[data-responses]").textContent = item.responses;
+      }
+    } catch (_) { }
+  };
+  window.setInterval(update, 30000);
+})();
+</script>
 {% if alerts %}<h2>Alertas dos seus setores</h2><div class="cards">{% for alert in alerts %}<article class="card"><small>{{ survey_titles.get(alert.survey_id, 'Pesquisa') }} · {{ alert.sector }} · {{ alert.created_at.strftime('%d/%m/%Y %H:%M UTC') }}</small><h3>{% if alert.alert_type=='nps_decline' %}Queda no NPS{% else %}Avaliações baixas{% endif %}</h3><p>{{ alert.summary }}</p><a class="btn" href="{{ url_for('action_plans', alert_id=alert.id) }}">Criar plano de ação</a></article>{% endfor %}</div>{% endif %}
 {% if current_user.role=='master' %}<p><a href="{{ url_for('configure_alerts') }}">Ajustar limites de alertas</a> · <a href="{{ url_for('manage_goals') }}">Gerenciar metas</a></p>{% endif %}
 {% if goal_results %}<section class="card"><h2>Metas do setor · {{ goals_period }}</h2><div class="cards">{% for result in goal_results %}<article class="card"><small>{{ result.goal.sector }}{% if result.goal.survey_id %} · {{ survey_titles.get(result.goal.survey_id, 'Pesquisa') }}{% endif %}</small><h3>{{ 'Média / 5' if result.goal.metric=='average' else 'NPS' }}</h3>{% if result.value is none %}<p class="muted">Meta {{ result.goal.target }} · aguardando pelo menos 3 respostas no mês.</p>{% else %}<p><strong>{{ result.value }}</strong> de {{ result.goal.target }} · {{ result.count }} respostas</p><div class="goal-track" role="progressbar" aria-label="Progresso da meta de {{ result.goal.sector }}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ result.progress }}"><span style="width:{{ result.progress }}%"></span></div><p>{{ 'Meta atingida' if result.met else 'Abaixo da meta' }}</p>{% endif %}</article>{% endfor %}</div></section>{% endif %}
