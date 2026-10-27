@@ -252,3 +252,21 @@ th { background: var(--navy); color: #fff; }
 .choice-list legend { padding: 0 8px; color: var(--navy); font-weight: 750; }
 .choice-list label { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
 .choice-list input { flex: 0 0 auto; width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--teal-dark); }
+
+.question-card { padding: 0; overflow: hidden; }
+.question-summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 20px 24px; list-style: none; cursor: pointer; }
+.question-summary::-webkit-details-marker { display: none; }
+.question-summary > span { min-width: 0; }
+.question-summary strong { display: block; margin-top: 7px; color: var(--navy); font-size: 17px; line-height: 1.4; }
+.question-card[open] .question-summary { border-bottom: 1px solid var(--line); background: #FAFCFB; }
+.question-editor { padding: 0 24px 24px; }
+.drag-handle { flex: 0 0 auto; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--blue); background: #fff; cursor: grab; font-size: 19px; touch-action: none; }
+.drag-handle:active { cursor: grabbing; }
+.question-card.is-dragging { opacity: .45; }
+.question-card.is-drop-target { outline: 2px dashed var(--teal-dark); outline-offset: 3px; }
+.danger-zone { border-color: #E8C5C2; }
+@media (max-width: 700px) {
+  .question-summary { padding: 16px; gap: 8px; }
+  .question-summary strong { font-size: 15px; }
+  .question-editor { padding: 0 16px 16px; }
+}

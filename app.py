@@ -269,7 +269,7 @@ def print_dashboard():
     return render_template("dashboard_print.html", stats=stats, layout=layout, generated_at=now())
 
 @app.route("/admin/surveys", methods=["GET", "POST"])
-@roles("master")
+@login_required
 def manage_surveys():
     if request.method == "POST":
         title = request.form.get("title", "").strip()
@@ -323,7 +323,7 @@ def delete_survey(sid):
     return redirect(url_for("manage_surveys"))
 
 @app.route("/admin/surveys/<int:sid>", methods=["GET", "POST"])
-@roles("master")
+@login_required
 def edit_survey(sid):
     survey = db.get_or_404(Survey, sid)
     if request.method == "POST":
@@ -389,6 +389,24 @@ def edit_survey(sid):
         db.session.commit()
         return redirect(url_for("edit_survey", sid=sid))
     return render_template("edit_survey.html", survey=survey)
+
+@app.post("/admin/surveys/<int:sid>/reorder")
+@login_required
+def reorder_survey_questions(sid):
+    survey = db.get_or_404(Survey, sid)
+    payload = request.get_json(silent=True) or {}
+    order = payload.get("order")
+    current_ids = [q.id for q in survey.questions]
+    if (not isinstance(order, list) or len(order) != len(current_ids)
+            or any(type(item) is not int for item in order)
+            or set(order) != set(current_ids)):
+        abort(400)
+    questions_by_id = {q.id: q for q in survey.questions}
+    for position, question_id in enumerate(order, start=1):
+        questions_by_id[question_id].position = position
+    log("question_reorder", str(sid))
+    db.session.commit()
+    return jsonify(ok=True)
 
 @app.route("/admin/merchants", methods=["GET", "POST"])
 @roles("master")
