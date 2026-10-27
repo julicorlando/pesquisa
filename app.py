@@ -1132,7 +1132,10 @@ def manage_surveys():
             log("survey_create", slug)
             db.session.commit()
             return redirect(url_for("edit_survey", sid=s.id))
-    return render_template("surveys.html", surveys=Survey.query.order_by(Survey.id.desc()).all())
+    surveys = Survey.query.order_by(Survey.id.desc()).all()
+    response_counts = {survey_id: count for survey_id, count in
+        db.session.query(Response.survey_id, db.func.count(Response.id)).group_by(Response.survey_id).all()}
+    return render_template("surveys.html", surveys=surveys, response_counts=response_counts)
 
 @app.post("/admin/surveys/<int:sid>/delete")
 @roles("master")
@@ -1219,8 +1222,21 @@ def questions_csv_response(filename, rows):
 def questions_csv_model():
     return questions_csv_response("modelo_perguntas_pesquisa.csv", [])
 
+def survey_editor(view):
+    """Restringe as rotas de edição depois da primeira resposta ao Master."""
+    @wraps(view)
+    def wrapped(sid, *args, **kwargs):
+        survey = db.get_or_404(Survey, sid)
+        if getattr(current_user, "role", None) != "master" and Response.query.filter_by(survey_id=sid).first():
+            flash("Esta pesquisa já recebeu resposta. Somente o Master pode editá-la.", "info")
+            return redirect(url_for("public_survey", slug=survey.slug))
+        return view(sid, *args, **kwargs)
+    return wrapped
+
+
 @app.get("/admin/surveys/<int:sid>/questions.csv")
 @login_required
+@survey_editor
 def export_survey_questions(sid):
     survey = db.get_or_404(Survey, sid)
     rows = [
@@ -1231,6 +1247,7 @@ def export_survey_questions(sid):
 
 @app.post("/admin/surveys/<int:sid>/questions/import")
 @login_required
+@survey_editor
 def import_survey_questions(sid):
     survey = db.get_or_404(Survey, sid)
     uploaded = request.files.get("file")
@@ -1331,6 +1348,7 @@ def sector_rating_average(survey_id, sector):
 
 @app.route("/admin/surveys/<int:sid>", methods=["GET", "POST"])
 @login_required
+@survey_editor
 def edit_survey(sid):
     survey = db.get_or_404(Survey, sid)
     if request.method == "POST":
@@ -1482,6 +1500,7 @@ def edit_survey(sid):
 
 @app.get("/admin/surveys/<int:sid>/qrcode.png")
 @login_required
+@survey_editor
 def survey_qrcode(sid):
     survey = db.get_or_404(Survey, sid)
     import qrcode
@@ -1576,6 +1595,7 @@ def remind_survey_invites(sid):
 
 @app.post("/admin/surveys/<int:sid>/reorder")
 @login_required
+@survey_editor
 def reorder_survey_questions(sid):
     survey = db.get_or_404(Survey, sid)
     payload = request.get_json(silent=True) or {}

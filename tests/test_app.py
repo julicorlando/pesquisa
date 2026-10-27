@@ -632,3 +632,35 @@ def test_survey_author_can_disable_participant_followup(client):
     public=client.get("/p/retorno-opcional")
     assert public.status_code == 200
     assert b"Retorno sobre o problema relatado" not in public.data
+
+
+def test_non_master_loses_edit_access_after_first_response(client):
+    with app.app_context():
+        db.session.add(User(username="comercial", password_hash=generate_password_hash("long-test-pass"), role="comercial"))
+        survey=Survey(title="Pesquisa publicada",slug="pesquisa-publicada",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        db.session.add(Question(survey_id=survey.id,sector="Geral",text="Como foi a visita?",position=1))
+        db.session.add(Response(survey_id=survey.id))
+        db.session.commit()
+        sid=survey.id
+    signin(client,"comercial","long-test-pass")
+    edit=client.get(f"/admin/surveys/{sid}")
+    assert edit.status_code == 302
+    assert edit.location.endswith("/p/pesquisa-publicada")
+    assert client.get(f"/admin/surveys/{sid}/questions.csv").status_code == 302
+    listing=client.get("/admin/surveys")
+    assert listing.status_code == 200
+    assert "Edição exclusiva do Master".encode() in listing.data
+    assert "Link público".encode() in listing.data
+
+def test_master_can_edit_survey_after_responses(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey=Survey(title="Pesquisa publicada",slug="pesquisa-publicada",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        db.session.add(Question(survey_id=survey.id,sector="Geral",text="Como foi a visita?",position=1))
+        db.session.add(Response(survey_id=survey.id))
+        db.session.commit()
+        sid=survey.id
+    signin(client,"master","long-test-pass")
+    assert client.get(f"/admin/surveys/{sid}").status_code == 200

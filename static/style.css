@@ -313,3 +313,16 @@ a { text-underline-offset: .18em; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .question-reorder { display: inline-flex; gap: 5px; align-items: center; }
 .question-reorder button { min-width: 42px; min-height: 42px; }
+
+/* Animações leves na experiência de resposta */
+@keyframes survey-enter { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+.survey-shell { animation: survey-enter .55s ease-out both; }
+.question-step:not([hidden]) { animation: survey-enter .38s ease-out both; }
+.progress > div { transition: width .35s ease; }
+.btn { transition: transform .16s ease, box-shadow .16s ease, background-color .16s ease; }
+.btn:hover { transform: translateY(-1px); box-shadow: 0 5px 14px rgba(20,31,57,.14); }
+@media (prefers-reduced-motion: reduce) {
+  .survey-shell, .question-step:not([hidden]) { animation: none !important; }
+  .progress > div, .btn { transition: none !important; }
+  .btn:hover { transform: none; }
+}
