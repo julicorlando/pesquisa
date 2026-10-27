@@ -2186,11 +2186,10 @@ def deliver_scheduled_report(schedule, run_at):
     return True
 
 def public_invite_url(survey, token):
-    path = url_for("public_survey", slug=survey.slug, invite=token)
     if has_request_context():
         return url_for("public_survey", slug=survey.slug, invite=token, _external=True)
     base_url = (os.environ.get("PUBLIC_BASE_URL") or "https://nps.shoppingcarpina.com.br").rstrip("/")
-    return base_url + path
+    return base_url + "/p/" + survey.slug + "?invite=" + token
 
 def send_due_invite_reminders(run_at=None, batch_limit=100):
     run_at = run_at or now()
