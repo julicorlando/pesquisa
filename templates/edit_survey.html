@@ -27,6 +27,16 @@
     <button class="btn">Adicionar pergunta</button><p class="muted">Ao adicionar, a pergunta é gravada imediatamente e permanece no rascunho.</p>
   </form>
 </div>
+<div class="card">
+  <h2>Importar ou exportar perguntas (CSV)</h2>
+  <p>Baixe o modelo aceito, preencha os campos e importe o arquivo. Use CSV UTF-8 com separador ponto e vírgula. Tipos aceitos: <code>rating</code>, <code>open</code>, <code>single</code> e <code>multiple</code>. Para múltipla escolha, separe as opções com <code>|</code>. A importação valida tudo antes de salvar e mantém as perguntas que já existem.</p>
+  <p><a class="btn secondary" href="{{ url_for('questions_csv_model') }}">Baixar modelo CSV</a> <a class="btn secondary" href="{{ url_for('export_survey_questions', sid=survey.id) }}">Exportar perguntas desta pesquisa</a></p>
+  <form method="post" enctype="multipart/form-data" action="{{ url_for('import_survey_questions', sid=survey.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Arquivo CSV<input type="file" name="file" accept=".csv,text/csv" required></label>
+    <button class="btn">Importar perguntas</button>
+  </form>
+</div>
 <h2>Perguntas</h2>
 <p class="muted">Clique em uma pergunta para editar. Arraste o ícone ⠿ para mudar a posição.</p>
 <div id="questionList" data-reorder-url="{{ url_for('reorder_survey_questions', sid=survey.id) }}" data-csrf="{{ csrf_token() }}">
