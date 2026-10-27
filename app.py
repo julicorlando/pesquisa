@@ -733,7 +733,11 @@ def action_plans():
         if not db.session.get(Survey, plan.survey_id):
             abort(400)
         selected_survey = db.session.get(Survey, plan.survey_id)
-        if not Question.query.filter(Question.survey_id == selected_survey.id, Question.sector == sector).first():
+        survey_has_questions = Question.query.filter_by(survey_id=selected_survey.id).first() is not None
+        sector_has_questions = Question.query.filter(Question.survey_id == selected_survey.id, Question.sector == sector).first() is not None
+        if survey_has_questions and not sector_has_questions:
+            abort(403)
+        if not survey_has_questions and current_user.role != "master":
             abort(403)
         plan.sector = sector
         plan.title = request.form.get("title", "").strip()[:200]
@@ -765,7 +769,8 @@ def action_plans():
             flash("Plano de ação salvo.", "success")
         return redirect(url_for("action_plans"))
     plans = ActionPlan.query.filter(ActionPlan.sector.in_(accessible)).order_by(ActionPlan.due_date, ActionPlan.id.desc()).all() if accessible else []
-    surveys = (Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all()
+    surveys = (Survey.query.filter(db.or_(Survey.questions.any(Question.sector.in_(accessible)),
+        db.and_(current_user.role == "master", ~Survey.questions.any()))).order_by(Survey.title).all()
                if accessible else [])
     survey_titles = {s.id: s.title for s in surveys}
     alert_id = request.args.get("alert_id", type=int)
