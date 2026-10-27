@@ -378,3 +378,9 @@ a { text-underline-offset: .18em; }
 .question-answer-card > summary h3 { margin: 12px 0; }
 .question-answer-card > summary:focus-visible { outline: 3px solid var(--teal, #008b8b); outline-offset: -4px; border-radius: 12px; }
 .question-answer-content { padding: 0 24px 24px; }
+
+.question-answer-list { display: flex; flex-direction: column; gap: 16px; }
+.question-answer-list > .question-answer-card { width: 100%; box-sizing: border-box; }
+.question-answer-card > summary { min-height: 68px; display: flex; flex-direction: column; justify-content: center; }
+.question-answer-card > summary h3 { margin: 8px 0; }
+.question-answer-card[open] > summary { border-bottom: 1px solid var(--line, #d9e4e1); }
