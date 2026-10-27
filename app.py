@@ -78,6 +78,15 @@ def parse_choices(value):
         return None
     return options
 
+def branch_value_valid(question, value):
+    if not question or not value:
+        return False
+    if question.answer_type == "rating":
+        return value in ("1", "2", "3", "4", "5", "na")
+    if question.answer_type == "nps":
+        return value in tuple(str(n) for n in range(11))
+    return question.answer_type == "single" and value in question.choice_options
+
 def valid_cnpj(value):
     d = cnpj_digits(value)
     if len(d) != 14 or len(set(d)) == 1:
@@ -140,6 +149,8 @@ class Question(db.Model):
     answer_type = db.Column(db.String(20), nullable=False, default="rating")
     notice = db.Column(db.Text, default="")
     choices = db.Column(db.Text, nullable=False, default="[]")
+    branch_question_id = db.Column(db.Integer, db.ForeignKey("question.id"), nullable=True)
+    branch_value = db.Column(db.String(255), nullable=False, default="")
     @property
     def choice_options(self):
         try:
@@ -194,6 +205,25 @@ class Audit(db.Model):
     detail = db.Column(db.Text, default="")
     ip_hash = db.Column(db.String(64))
     created_at = db.Column(db.DateTime(timezone=True), default=now)
+
+class ActionPlan(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
+    sector = db.Column(db.String(50), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, default="")
+    owner = db.Column(db.String(120), default="")
+    priority = db.Column(db.String(10), default="media")
+    status = db.Column(db.String(20), default="aberto")
+    due_date = db.Column(db.Date)
+    created_at = db.Column(db.DateTime(timezone=True), default=now)
+
+class SurveyInvite(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
+    email = db.Column(db.String(255), nullable=False)
+    reminder_sent_at = db.Column(db.DateTime(timezone=True))
+    __table_args__ = (db.UniqueConstraint("survey_id", "email", name="uq_survey_invite_email"),)
 
 def log(event, detail="", actor=None):
     salt = app.config["SECRET_KEY"].encode()
@@ -259,36 +289,127 @@ def logout():
     logout_user()
     return redirect(url_for("index"))
 
+def dashboard_data(accessible):
+    query = (db.session.query(
+                Survey.id, Survey.title, Question.sector, Question.answer_type,
+                db.func.count(Answer.id), db.func.avg(Answer.rating),
+                db.func.sum(db.case((Answer.rating >= 9, 1), else_=0)),
+                db.func.sum(db.case((Answer.rating <= 6, 1), else_=0)),
+                db.func.sum(db.case((db.and_(Answer.rating >= 7, Answer.rating <= 8), 1), else_=0)))
+             .join(Question, Question.survey_id == Survey.id)
+             .outerjoin(Answer, db.and_(Answer.question_id == Question.id,
+                 db.or_(db.and_(Question.answer_type == "rating", Answer.rating.between(1, 5)),
+                        db.and_(Question.answer_type == "nps", Answer.rating.between(0, 10)))))
+             .outerjoin(Response, Response.id == Answer.response_id)
+             .filter(Question.answer_type.in_(("rating", "nps")), Question.sector.in_(accessible)))
+    survey_id = request.args.get("survey", type=int)
+    sector = request.args.get("sector", "")
+    date_from = request.args.get("from", "")
+    date_to = request.args.get("to", "")
+    if survey_id:
+        query = query.filter(Survey.id == survey_id)
+    if sector in accessible:
+        query = query.filter(Question.sector == sector)
+    try:
+        if date_from:
+            query = query.filter(Response.submitted_at >= datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc))
+        if date_to:
+            query = query.filter(Response.submitted_at < datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1))
+    except ValueError:
+        date_from = date_to = ""
+    rows = query.group_by(Survey.id, Question.sector, Question.answer_type).order_by(Survey.id.desc()).all()
+    stats = []
+    for sid, title, sec, kind, count, average, promoters, detractors, passives in rows:
+        count = int(count or 0)
+        nps_score = round(((int(promoters or 0) - int(detractors or 0)) / count) * 100) if count >= 3 and kind == "nps" else None
+        stats.append({"survey": title, "survey_id": sid, "sector": sec, "type": kind, "count": count,
+                      "avg": round(float(average), 2) if count >= 3 and kind == "rating" and average is not None else None,
+                      "nps": nps_score, "promoters": int(promoters or 0), "detractors": int(detractors or 0), "passives": int(passives or 0)})
+    trend_query = (db.session.query(
+            db.func.extract("year", Response.submitted_at), db.func.extract("month", Response.submitted_at),
+            Survey.title, Question.sector, Question.answer_type, db.func.count(Answer.id), db.func.avg(Answer.rating),
+            db.func.sum(db.case((Answer.rating >= 9, 1), else_=0)),
+            db.func.sum(db.case((Answer.rating <= 6, 1), else_=0)))
+        .join(Question, Question.survey_id == Survey.id)
+        .join(Answer, Answer.question_id == Question.id)
+        .join(Response, Response.id == Answer.response_id)
+        .filter(Question.answer_type.in_(("rating", "nps")), Question.sector.in_(accessible)))
+    if survey_id:
+        trend_query = trend_query.filter(Survey.id == survey_id)
+    if sector in accessible:
+        trend_query = trend_query.filter(Question.sector == sector)
+    if date_from:
+        trend_query = trend_query.filter(Response.submitted_at >= datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc))
+    if date_to:
+        trend_query = trend_query.filter(Response.submitted_at < datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1))
+    trend_rows = trend_query.group_by(db.func.extract("year", Response.submitted_at), db.func.extract("month", Response.submitted_at), Survey.id, Question.sector, Question.answer_type).order_by(db.func.extract("year", Response.submitted_at), db.func.extract("month", Response.submitted_at)).all()
+    trends = []
+    for year, month, title, sec, kind, count, average, promoters, detractors in trend_rows:
+        count = int(count or 0)
+        trends.append({"month": "%04d-%02d" % (int(year), int(month)), "survey": title, "sector": sec,
+            "type": kind, "count": count, "avg": round(float(average), 2) if count >= 3 and kind == "rating" and average is not None else None,
+            "nps": round(((int(promoters or 0) - int(detractors or 0)) / count) * 100) if count >= 3 and kind == "nps" else None})
+    return stats, survey_id, sector, date_from, date_to, trends
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
     accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
-    # Agregação no banco e limiar mínimo contra reidentificação de respostas.
-    rows = (db.session.query(Survey.title, Question.sector, db.func.count(Answer.id), db.func.avg(Answer.rating))
-            .join(Question, Question.survey_id == Survey.id)
-            .outerjoin(Answer, db.and_(Answer.question_id == Question.id, Answer.rating.between(1, 5)))
-            .filter(Question.answer_type == "rating", Question.sector.in_(accessible))
-            .group_by(Survey.id, Question.sector).order_by(Survey.id.desc()).all()) if accessible else []
-    stats = [{"survey": a, "sector": b, "count": int(c), "avg": round(float(d), 2) if c >= 3 and d is not None else None} for a,b,c,d in rows]
+    stats, selected_survey, selected_sector, date_from, date_to, trends = dashboard_data(accessible)
     log("dashboard_view", ",".join(accessible))
     db.session.commit()
-    return render_template("dashboard.html", stats=stats, surveys=Survey.query.all() if current_user.role == "master" else [])
-
+    return render_template("dashboard.html", stats=stats,
+        surveys=Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all() if accessible else [],
+        sectors=accessible, selected_survey=selected_survey, selected_sector=selected_sector,
+        date_from=date_from, date_to=date_to, trends=trends)
 
 @app.get("/dashboard/print")
 @login_required
 def print_dashboard():
     accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
-    rows = (db.session.query(Survey.title, Question.sector, db.func.count(Answer.id), db.func.avg(Answer.rating))
-            .join(Question, Question.survey_id == Survey.id)
-            .outerjoin(Answer, db.and_(Answer.question_id == Question.id, Answer.rating.between(1, 5)))
-            .filter(Question.answer_type == "rating", Question.sector.in_(accessible))
-            .group_by(Survey.id, Question.sector).order_by(Survey.id.desc()).all()) if accessible else []
-    stats = [{"survey": a, "sector": b, "count": int(c), "avg": round(float(d), 2) if c >= 3 and d is not None else None} for a,b,c,d in rows]
+    stats, _, _, _, _, _ = dashboard_data(accessible)
     layout = request.args.get("format") if request.args.get("format") in ("cards", "bi") else "cards"
     log("dashboard_print", layout)
     db.session.commit()
     return render_template("dashboard_print.html", stats=stats, layout=layout, generated_at=now())
+
+@app.route("/action-plans", methods=["GET", "POST"])
+@login_required
+def action_plans():
+    accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
+    if request.method == "POST":
+        plan_id = request.form.get("plan_id", type=int)
+        plan = db.get_or_404(ActionPlan, plan_id) if plan_id else ActionPlan()
+        sector = request.form.get("sector", "")
+        if sector not in accessible or (plan_id and plan.sector not in accessible):
+            abort(403)
+        plan.survey_id = request.form.get("survey_id", type=int)
+        if not db.session.get(Survey, plan.survey_id):
+            abort(400)
+        plan.sector = sector
+        plan.title = request.form.get("title", "").strip()[:200]
+        plan.description = request.form.get("description", "").strip()[:2000]
+        plan.owner = request.form.get("owner", "").strip()[:120]
+        plan.priority = request.form.get("priority") if request.form.get("priority") in ("baixa", "media", "alta") else "media"
+        plan.status = request.form.get("status") if request.form.get("status") in ("aberto", "andamento", "concluido") else "aberto"
+        try:
+            due = request.form.get("due_date", "")
+            plan.due_date = datetime.strptime(due, "%Y-%m-%d").date() if due else None
+        except ValueError:
+            abort(400)
+        if not plan.title:
+            flash("Informe o título do plano de ação.", "error")
+        else:
+            if not plan_id:
+                db.session.add(plan)
+            log("action_plan_save", ("update:" if plan_id else "create:") + str(plan.id or "new"))
+            db.session.commit()
+            flash("Plano de ação salvo.", "success")
+        return redirect(url_for("action_plans"))
+    plans = ActionPlan.query.filter(ActionPlan.sector.in_(accessible)).order_by(ActionPlan.due_date, ActionPlan.id.desc()).all() if accessible else []
+    surveys = Survey.query.order_by(Survey.title).all()
+    survey_titles = {s.id: s.title for s in surveys}
+    return render_template("action_plans.html", plans=plans, surveys=surveys, sectors=accessible, survey_titles=survey_titles)
 
 @app.route("/admin/surveys", methods=["GET", "POST"])
 @login_required
@@ -338,6 +459,8 @@ def delete_survey(sid):
         Answer.query.filter(Answer.response_id.in_(response_ids)).delete(synchronize_session=False)
     Response.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     RespondentIdentity.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    ActionPlan.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    SurveyInvite.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     log("survey_delete", "survey:" + str(sid))
     db.session.delete(survey)
     db.session.commit()
@@ -400,7 +523,7 @@ def import_survey_questions(sid):
         if not required.issubset(headers):
             raise ValueError("Cabeçalhos inválidos. Baixe e use o modelo CSV disponibilizado.")
         prepared, errors = [], []
-        aliases = {"rating": "rating", "aberta": "open", "open": "open", "multipla_escolha": "single", "single": "single", "multipla_escolha_varias": "multiple", "multiple": "multiple"}
+        aliases = {"rating": "rating", "nps": "nps", "aberta": "open", "open": "open", "multipla_escolha": "single", "single": "single", "multipla_escolha_varias": "multiple", "multiple": "multiple"}
         for row_number, row in enumerate(reader, start=2):
             if not any((value or "").strip() for value in row.values() if value is not None):
                 continue
@@ -466,13 +589,23 @@ def edit_survey(sid):
         elif kind == "question":
             sector = request.form.get("sector")
             text = request.form.get("text", "").strip()
-            answer_type = request.form.get("answer_type") if request.form.get("answer_type") in ("rating", "open", "single", "multiple") else "rating"
+            answer_type = request.form.get("answer_type") if request.form.get("answer_type") in ("rating", "nps", "open", "single", "multiple") else "rating"
             notice = request.form.get("notice", "").strip()[:500]
             choices = parse_choices(request.form.get("choices", "")) if answer_type in ("single", "multiple") else []
-            if answer_type in ("single", "multiple") and choices is None:
+            branch_question_id = request.form.get("branch_question_id", type=int)
+            branch_parent = db.session.get(Question, branch_question_id) if branch_question_id else None
+            branch_value = request.form.get("branch_value", "")[:255]
+            if branch_parent and (branch_parent.survey_id != sid or branch_parent.position >= len(survey.questions) + 1 or branch_parent.answer_type not in ("rating", "nps", "single")):
+                branch_parent = None
+            if not branch_value:
+                branch_parent = None
+            invalid_branch = bool(branch_parent and not branch_value_valid(branch_parent, branch_value))
+            if invalid_branch:
+                flash("Escolha uma resposta válida para a condição da pergunta.", "error")
+            elif answer_type in ("single", "multiple") and choices is None:
                 flash("Informe de 2 a 20 opções exclusivas, uma por linha, com até 200 caracteres cada.", "error")
             elif sector in SECTORS and text:
-                db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False)))
+                db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), branch_question_id=branch_parent.id if branch_parent else None, branch_value=branch_value if branch_parent else ""))
                 log("question_create", str(sid))
                 flash("Pergunta adicionada e salva automaticamente.", "success")
         elif kind == "move_question":
@@ -500,7 +633,7 @@ def edit_survey(sid):
                 q.text = request.form.get("text", q.text)[:1000]
                 q.active = request.form.get("active") == "on"
                 q.notice = request.form.get("notice", "").strip()[:500]
-                if request.form.get("answer_type") in ("rating", "open", "single", "multiple"):
+                if request.form.get("answer_type") in ("rating", "nps", "open", "single", "multiple"):
                     new_type = request.form.get("answer_type")
                     has_answers = Answer.query.filter_by(question_id=q.id).first() is not None
                     new_choices = parse_choices(request.form.get("choices", "")) if new_type in ("single", "multiple") else []
@@ -512,10 +645,116 @@ def edit_survey(sid):
                     else:
                         q.answer_type = new_type
                         q.choices = json.dumps(new_choices, ensure_ascii=False)
+                parent_id = request.form.get("branch_question_id", type=int)
+                parent = db.session.get(Question, parent_id) if parent_id else None
+                branch_value = request.form.get("branch_value", "")[:255]
+                if parent and parent.survey_id == sid and parent.id != q.id and parent.position < q.position and parent.answer_type in ("rating", "nps", "single") and branch_value:
+                    if branch_value_valid(parent, branch_value):
+                        q.branch_question_id, q.branch_value = parent.id, branch_value
+                    else:
+                        flash("Escolha uma resposta válida para a condição da pergunta.", "error")
+                else:
+                    q.branch_question_id, q.branch_value = None, ""
                 log("question_update", str(q.id))
         db.session.commit()
         return redirect(url_for("edit_survey", sid=sid))
-    return render_template("edit_survey.html", survey=survey)
+    invite_total = SurveyInvite.query.filter_by(survey_id=sid).count()
+    invite_pending = SurveyInvite.query.filter_by(survey_id=sid, reminder_sent_at=None).count()
+    response_count = Response.query.filter_by(survey_id=sid).count()
+    return render_template("edit_survey.html", survey=survey, invite_total=invite_total,
+        invite_pending=invite_pending, response_count=response_count)
+
+@app.get("/admin/surveys/<int:sid>/qrcode.png")
+@login_required
+def survey_qrcode(sid):
+    survey = db.get_or_404(Survey, sid)
+    import qrcode
+    image = qrcode.make(url_for("public_survey", slug=survey.slug, _external=True))
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return send_file(output, mimetype="image/png", download_name="qr_" + survey.slug + ".png")
+
+@app.post("/admin/surveys/<int:sid>/invites/import")
+@roles("master")
+def import_survey_invites(sid):
+    survey = db.get_or_404(Survey, sid)
+    uploaded = request.files.get("file")
+    if not uploaded:
+        flash("Selecione um CSV com uma coluna email.", "error")
+        return redirect(url_for("edit_survey", sid=sid))
+    raw = uploaded.read(2 * 1024 * 1024 + 1)
+    try:
+        if len(raw) > 2 * 1024 * 1024:
+            raise ValueError("O arquivo excede 2 MB.")
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig"), newline=""), delimiter=";")
+        if not reader.fieldnames or "email" not in [h.strip().lower() for h in reader.fieldnames]:
+            raise ValueError("Use cabeçalho email e separador ponto e vírgula.")
+        column = reader.fieldnames[[h.strip().lower() for h in reader.fieldnames].index("email")]
+        emails = []
+        for row in reader:
+            email = (row.get(column) or "").strip().lower()
+            if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise ValueError("Há endereço de e-mail inválido; nenhum registro foi importado.")
+            if email:
+                emails.append(email[:255])
+            if len(emails) > 1000:
+                raise ValueError("O limite é de 1.000 endereços por arquivo.")
+        for email in set(emails):
+            exists = SurveyInvite.query.filter_by(survey_id=sid, email=email).first()
+            if not exists:
+                db.session.add(SurveyInvite(survey_id=sid, email=email))
+        log("survey_invites_import", str(sid) + ":" + str(len(set(emails))))
+        db.session.commit()
+        flash(str(len(set(emails))) + " destinatário(s) processado(s). Endereços ficam separados das respostas.", "success")
+    except (UnicodeDecodeError, csv.Error, ValueError) as exc:
+        db.session.rollback()
+        flash("CSV não importado: " + str(exc)[:250], "error")
+    return redirect(url_for("edit_survey", sid=sid))
+
+@app.get("/admin/invites/model.csv")
+@roles("master")
+def survey_invites_csv_model():
+    output = io.BytesIO("\ufeffemail\r\n".encode("utf-8"))
+    return send_file(output, mimetype="text/csv; charset=utf-8", as_attachment=True, download_name="modelo_destinatarios.csv")
+
+@app.post("/admin/surveys/<int:sid>/invites/remind")
+@roles("master")
+@limiter.limit("2 per hour")
+def remind_survey_invites(sid):
+    survey = db.get_or_404(Survey, sid)
+    if not survey.active:
+        flash("Publique a pesquisa antes de enviar lembretes.", "error")
+        return redirect(url_for("edit_survey", sid=sid))
+    settings = effective_smtp_settings()
+    if not settings["host"]:
+        flash("Configure o SMTP antes de enviar lembretes.", "error")
+        return redirect(url_for("edit_survey", sid=sid))
+    pending = SurveyInvite.query.filter_by(survey_id=sid, reminder_sent_at=None).limit(1000).all()
+    sent = 0
+    try:
+        with smtplib.SMTP(settings["host"], int(settings["port"]), timeout=12) as smtp:
+            if settings["tls"]:
+                smtp.starttls()
+            if settings["username"]:
+                smtp.login(settings["username"], settings["password"])
+            for invite in pending:
+                msg = EmailMessage()
+                msg["Subject"] = "Lembrete: pesquisa de satisfação — " + survey.title
+                msg["From"] = settings["from_address"] or "pesquisa@example.invalid"
+                msg["To"] = invite.email
+                msg.set_content("A pesquisa de satisfação está aberta. Responda pelo link: " + url_for("public_survey", slug=survey.slug, _external=True) + "\\n\\nOs dados de identificação não são vinculados às respostas individuais.")
+                smtp.send_message(msg)
+                invite.reminder_sent_at = now()
+                sent += 1
+        log("survey_reminders_sent", str(sid) + ":" + str(sent))
+        db.session.commit()
+        flash(str(sent) + " lembrete(s) enviado(s).", "success")
+    except Exception:
+        db.session.commit()
+        app.logger.exception("Falha no envio de lembretes")
+        flash(str(sent) + " lembrete(s) enviado(s); houve falha no restante. Os pendentes podem ser reenviados.", "error")
+    return redirect(url_for("edit_survey", sid=sid))
 
 @app.post("/admin/surveys/<int:sid>/reorder")
 @login_required
@@ -529,6 +768,10 @@ def reorder_survey_questions(sid):
             or set(order) != set(current_ids)):
         abort(400)
     questions_by_id = {q.id: q for q in survey.questions}
+    positions = {question_id: index for index, question_id in enumerate(order, start=1)}
+    for question in survey.questions:
+        if question.branch_question_id and positions.get(question.branch_question_id, 0) >= positions.get(question.id, 0):
+            return jsonify(ok=False, error="A pergunta condicionada precisa ficar depois da pergunta que controla sua exibição."), 400
     for position, question_id in enumerate(order, start=1):
         questions_by_id[question_id].position = position
     log("question_reorder", str(sid))
@@ -759,9 +1002,10 @@ def public_survey(slug):
                 )
                 db.session.add(pending)
                 db.session.commit()
+                has_branches = any(q.branch_question_id for q in questions)
                 session["survey_state"] = {"survey": s.id, "token": token, "merchant_id": matched.id if matched else None,
                                            "question_order": [q.id for q in questions]}
-                if s.shuffle_questions:
+                if s.shuffle_questions and not has_branches:
                     random.shuffle(session["survey_state"]["question_order"])
                 return redirect(url_for("answer_survey", slug=slug))
     return render_template("identity.html", survey=s)
@@ -787,6 +1031,10 @@ def answer_survey(slug):
         answers = {}
         for q in questions:
             raw = request.form.get("q_" + str(q.id), "").strip()
+            if q.branch_question_id:
+                parent_value = request.form.get("q_" + str(q.branch_question_id), "").strip()
+                if parent_value != q.branch_value:
+                    continue
             if q.answer_type in ("single", "multiple"):
                 selected = request.form.getlist("q_" + str(q.id))
                 options = q.choice_options
@@ -800,7 +1048,8 @@ def answer_survey(slug):
                     return render_template("answer.html", survey=s, questions=questions, values=request.form)
                 answers[q.id] = {"rating": 0, "text": raw}
             else:
-                if raw not in ("1", "2", "3", "4", "5", "na"):
+                allowed = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10") if q.answer_type == "nps" else ("1", "2", "3", "4", "5", "na")
+                if raw not in allowed:
                     flash("Responda todas as perguntas antes de confirmar.", "error")
                     return render_template("answer.html", survey=s, questions=questions, values=request.form)
                 answers[q.id] = {"rating": 0 if raw == "na" else int(raw), "text": None}
@@ -823,6 +1072,8 @@ def answer_survey(slug):
         identity.submitted_at = now()
         db.session.flush()
         for q in questions:
+            if q.id not in answers:
+                continue
             item = answers[q.id]
             db.session.add(Answer(response_id=resp.id, question_id=q.id, rating=item["rating"], answer_text=item["text"]))
         log("survey_submitted", "survey:" + str(s.id))
@@ -946,6 +1197,8 @@ def ensure_schema():
                 "answer_type": "VARCHAR(20) NOT NULL DEFAULT 'rating'",
                 "notice": "TEXT NOT NULL DEFAULT ''",
             "choices": "TEXT NOT NULL DEFAULT '[]'",
+            "branch_question_id": "INTEGER",
+            "branch_value": "VARCHAR(255) NOT NULL DEFAULT ''",
             },
             "answer": {"answer_text": "TEXT"},
             "respondent_identity": {

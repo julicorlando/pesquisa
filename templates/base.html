@@ -7,7 +7,7 @@
   <meta name="description" content="Pesquisa de satisfação do Shopping Carpina.">
   <title>{% block title %}Pesquisa | Shopping Carpina{% endblock %}</title>
   <link rel="icon" type="image/png" href="{{ url_for('static', filename='shopping-carpina-mark.png') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261027-question-order') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261027-six-features') }}">
 </head>
 <body>
   <header class="top">
@@ -19,6 +19,7 @@
     <nav aria-label="Navegação principal">
       {% if current_user.is_authenticated %}
         <a href="{{ url_for('dashboard') }}">Indicadores</a>
+        <a href="{{ url_for('action_plans') }}">Planos de ação</a>
         <a href="{{ url_for('manage_surveys') }}">Pesquisas</a>
         {% if current_user.role == 'master' %}
           <a href="{{ url_for('merchants') }}">Lojistas</a>

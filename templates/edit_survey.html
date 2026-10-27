@@ -2,13 +2,24 @@
 {% block content %}
 <h1>Editar: {{ survey.title }}</h1>
 <div class="card">
+  <h2>Divulgação e acompanhamento</h2>
+  <p><strong>{{ response_count }}</strong> respostas registradas · Link público: <a href="{{ url_for('public_survey', slug=survey.slug, _external=True) }}" target="_blank">abrir pesquisa</a></p>
+  <p><img class="survey-qr" src="{{ url_for('survey_qrcode', sid=survey.id) }}" alt="QR Code para abrir esta pesquisa"><a class="btn secondary" href="{{ url_for('survey_qrcode', sid=survey.id) }}">Baixar QR Code</a></p>
+  {% if current_user.role == 'master' %}<h3>Lembretes por e-mail</h3>
+  <p>Importe uma lista CSV com cabeçalho <code>email</code>; os endereços são guardados separados das respostas. <a href="{{ url_for('survey_invites_csv_model') }}">Baixar modelo CSV</a>.</p>
+  <form method="post" enctype="multipart/form-data" action="{{ url_for('import_survey_invites', sid=survey.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Destinatários (CSV)<input type="file" name="file" accept=".csv,text/csv" required></label><button class="btn secondary">Importar destinatários</button></form>
+  <p>{{ invite_pending }} lembrete(s) pendente(s) de {{ invite_total }} destinatário(s).</p>
+  <form method="post" action="{{ url_for('remind_survey_invites', sid=survey.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn" {% if not survey.active or not invite_pending %}disabled{% endif %}>Enviar lembretes pendentes via SMTP</button></form>
+  {% endif %}
+</div>
+<div class="card">
   <form method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="settings">
     <label>Título<input name="title" value="{{ survey.title }}" required></label>
     <label>Descrição<textarea name="description" maxlength="2000">{{ survey.description }}</textarea></label>
     <label>Visibilidade<select name="target"><option value="lojista" {% if survey.target=='lojista' %}selected{% endif %}>Somente lojistas autorizados</option><option value="publico" {% if survey.target=='publico' %}selected{% endif %}>Público geral</option></select></label>
     <label>Documento de identificação solicitado<select name="identity_type"><option value="none" {% if survey.identity_type=='none' %}selected{% endif %}>Não solicitar documento</option><option value="cpf" {% if survey.identity_type=='cpf' %}selected{% endif %}>CPF</option><option value="cnpj" {% if survey.identity_type=='cnpj' %}selected{% endif %}>CNPJ</option></select></label>
-    <label class="check"><input name="shuffle_questions" type="checkbox" {% if survey.shuffle_questions %}checked{% endif %}> Embaralhar a ordem das perguntas para cada resposta</label>
+    <label class="check"><input name="shuffle_questions" type="checkbox" {% if survey.shuffle_questions %}checked{% endif %}> Embaralhar a ordem das perguntas para cada resposta</label><p class="muted">Se houver ramificação condicional, a ordem fica fixa para manter a pergunta dependente após sua condição.</p>
     <label class="check"><input name="active" type="checkbox" {% if survey.active %}checked{% endif %}> Pesquisa publicada e aberta para respostas</label>
     <button class="btn">Salvar configuração</button>
     <button class="btn secondary" name="save_draft" value="yes">Salvar como rascunho</button>
@@ -21,7 +32,9 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="question">
     <label>Setor<select name="sector">{% for item in sectors %}<option>{{ item }}</option>{% endfor %}</select></label>
     <label>Enunciado<textarea name="text" required maxlength="1000"></textarea></label>
-    <label>Tipo de resposta<select name="answer_type"><option value="rating">Avaliação de 1 a 5</option><option value="open">Resposta aberta (até 5.000 caracteres)</option><option value="single">Múltipla escolha (uma opção)</option><option value="multiple">Múltipla escolha (uma ou mais opções)</option></select></label>
+    <label>Tipo de resposta<select name="answer_type"><option value="rating">Avaliação de 1 a 5</option><option value="nps">NPS de 0 a 10</option><option value="open">Resposta aberta (até 5.000 caracteres)</option><option value="single">Múltipla escolha (uma opção)</option><option value="multiple">Múltipla escolha (uma ou mais opções)</option></select></label>
+    <label>Ramificação condicional (opcional)<select name="branch_question_id"><option value="">Sempre exibir</option>{% for parent in survey.questions if parent.active and parent.answer_type in ('rating','nps','single') %}<option value="{{ parent.id }}">Após: {{ parent.text }}</option>{% endfor %}</select></label>
+    <label>Exibir quando a resposta anterior for exatamente<input name="branch_value" maxlength="255" placeholder="Ex.: 1, 10 ou Sim"></label>
     <label>Opções (uma por linha; 2 a 20; para múltipla escolha)<textarea name="choices" rows="5"></textarea></label>
     <label>Aviso opcional para quem responder<textarea name="notice" maxlength="500" placeholder="Ex.: considere apenas o estacionamento do shopping."></textarea></label>
     <button class="btn">Adicionar pergunta</button><p class="muted">Ao adicionar, a pergunta é gravada imediatamente e permanece no rascunho.</p>
@@ -29,7 +42,7 @@
 </div>
 <div class="card">
   <h2>Importar ou exportar perguntas (CSV)</h2>
-  <p>Baixe o modelo aceito, preencha os campos e importe o arquivo. Use CSV UTF-8 com separador ponto e vírgula. Tipos aceitos: <code>rating</code>, <code>open</code>, <code>single</code> e <code>multiple</code>. Para múltipla escolha, separe as opções com <code>|</code>. A importação valida tudo antes de salvar e mantém as perguntas que já existem.</p>
+  <p>Baixe o modelo aceito, preencha os campos e importe o arquivo. Use CSV UTF-8 com separador ponto e vírgula. Tipos aceitos: <code>rating</code>, <code>nps</code>, <code>open</code>, <code>single</code> e <code>multiple</code>. Para múltipla escolha, separe as opções com <code>|</code>. A importação valida tudo antes de salvar e mantém as perguntas que já existem.</p>
   <p><a class="btn secondary" href="{{ url_for('questions_csv_model') }}">Baixar modelo CSV</a> <a class="btn secondary" href="{{ url_for('export_survey_questions', sid=survey.id) }}">Exportar perguntas desta pesquisa</a></p>
   <form method="post" enctype="multipart/form-data" action="{{ url_for('import_survey_questions', sid=survey.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -49,9 +62,11 @@
     <form method="post" class="question-editor">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="edit_question"><input type="hidden" name="question_id" value="{{ q.id }}">
       <label>Enunciado<textarea name="text" required maxlength="1000">{{ q.text }}</textarea></label>
-      <label>Tipo de resposta<select name="answer_type"><option value="rating" {% if q.answer_type=='rating' %}selected{% endif %}>Avaliação de 1 a 5</option><option value="open" {% if q.answer_type=='open' %}selected{% endif %}>Resposta aberta (até 5.000 caracteres)</option><option value="single" {% if q.answer_type=='single' %}selected{% endif %}>Múltipla escolha (uma opção)</option><option value="multiple" {% if q.answer_type=='multiple' %}selected{% endif %}>Múltipla escolha (uma ou mais opções)</option></select></label>
+      <label>Tipo de resposta<select name="answer_type"><option value="rating" {% if q.answer_type=='rating' %}selected{% endif %}>Avaliação de 1 a 5</option><option value="nps" {% if q.answer_type=='nps' %}selected{% endif %}>NPS de 0 a 10</option><option value="open" {% if q.answer_type=='open' %}selected{% endif %}>Resposta aberta (até 5.000 caracteres)</option><option value="single" {% if q.answer_type=='single' %}selected{% endif %}>Múltipla escolha (uma opção)</option><option value="multiple" {% if q.answer_type=='multiple' %}selected{% endif %}>Múltipla escolha (uma ou mais opções)</option></select></label>
       <label>Opções (uma por linha; 2 a 20)<textarea name="choices" rows="5">{{ q.choice_options|join('\n') }}</textarea></label>
       <label>Aviso para quem responder<textarea name="notice" maxlength="500">{{ q.notice or '' }}</textarea></label>
+      <label>Ramificação condicional<select name="branch_question_id"><option value="">Sempre exibir</option>{% for parent in survey.questions if parent.active and parent.id != q.id and parent.position < q.position and parent.answer_type in ('rating','nps','single') %}<option value="{{ parent.id }}" {% if q.branch_question_id==parent.id %}selected{% endif %}>Após: {{ parent.text }}</option>{% endfor %}</select></label>
+      <label>Exibir quando a resposta anterior for exatamente<input name="branch_value" value="{{ q.branch_value or '' }}" maxlength="255" placeholder="Ex.: 1, 10 ou Sim"></label>
       <label class="check"><input type="checkbox" name="active" {% if q.active %}checked{% endif %}> Ativa</label>
       <button class="btn">Salvar pergunta</button>
       <button class="btn secondary" name="delete" value="yes" onclick="return confirm('Desativar ou excluir esta pergunta?')">Remover</button>
@@ -74,7 +89,7 @@
     const order=cards().map(card=>Number(card.dataset.questionId));
     try{
       const response=await fetch(list.dataset.reorderUrl,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRFToken':csrf},body:JSON.stringify({order})});
-      if(!response.ok)throw new Error('Não foi possível salvar a nova ordem.');
+      if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data.error||'Não foi possível salvar a nova ordem.');}
       refreshPositions();
     }catch(error){alert(error.message);window.location.reload();}
   }
