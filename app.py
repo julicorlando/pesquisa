@@ -502,7 +502,7 @@ def dashboard_question_details(survey_id, accessible, sector, date_from, date_to
             answers_query = answers_query.filter(Response.submitted_at >= datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc))
         if date_to:
             answers_query = answers_query.filter(Response.submitted_at < datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1))
-        rows = answers_query.order_by(Response.submitted_at.desc()).all()
+        rows = answers_query.all()
         item = {"question": question, "count": len(rows), "distribution": [], "open_answers": [], "hidden_text": False,
                 "distribution_suppressed": len(rows) < 3}
         if question.answer_type in ("rating", "nps"):
@@ -532,9 +532,10 @@ def dashboard_question_details(survey_id, accessible, sector, date_from, date_to
             item["distribution"] = [{"label": option, "count": count} for option, count in counts.items()]
         elif question.answer_type == "open":
             if role == "master" or question.sector == "Geral":
-                item["open_answers"] = [{"text": answer.answer_text, "themes": classify_comment(answer.answer_text), "submitted_at": submitted_at,
-                    "device_submitted_at": device_at, "device_timezone": device_zone}
-                    for answer, submitted_at, device_at, device_zone in rows if answer.answer_text]
+                open_rows = [row for row in rows if row[0].answer_text]
+                random.shuffle(open_rows)
+                item["open_answers"] = [{"text": answer.answer_text, "themes": classify_comment(answer.answer_text)}
+                    for answer, submitted_at, device_at, device_zone in open_rows]
             else:
                 item["hidden_text"] = True
         details.append(item)
