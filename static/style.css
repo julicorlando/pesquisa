@@ -357,3 +357,18 @@ a { text-underline-offset: .18em; }
   .progress > div, .btn { transition: none !important; }
   .btn:hover { transform: none; }
 }
+
+/* O controle range precisa escapar dos estilos globais de campos de formulário. */
+.satisfaction-slider input.satisfaction-range {
+  display: block;
+  width: 80%;
+  min-width: 0;
+  min-height: 0;
+  height: 42px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
