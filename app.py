@@ -6,7 +6,8 @@ import hashlib
 import unicodedata
 import smtplib
 import secrets
-from datetime import datetime, timezone
+import random
+from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from functools import wraps
 from urllib.parse import urlparse
@@ -18,6 +19,7 @@ from flask_wtf.csrf import CSRFProtect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy import inspect, text
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
@@ -53,6 +55,26 @@ def clean_name(v):
 def cnpj_digits(v):
     return re.sub(r"\D", "", v or "")
 
+def valid_cpf(value):
+    d = re.sub(r"\D", "", value or "")
+    if len(d) != 11 or len(set(d)) == 1:
+        return False
+    for i in (9, 10):
+        digit = (sum(int(d[j]) * (i + 1 - j) for j in range(i)) * 10) % 11
+        if digit == 10:
+            digit = 0
+        if int(d[i]) != digit:
+            return False
+    return True
+
+def parse_choices(value):
+    options = [line.strip() for line in (value or "").splitlines() if line.strip()]
+    if not 2 <= len(options) <= 20 or any(len(item) > 200 for item in options):
+        return None
+    if len({item.casefold() for item in options}) != len(options):
+        return None
+    return options
+
 def valid_cnpj(value):
     d = cnpj_digits(value)
     if len(d) != 14 or len(set(d)) == 1:
@@ -82,6 +104,8 @@ class Survey(db.Model):
     target = db.Column(db.String(30), default="lojista")
     active = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime(timezone=True), default=now)
+    identity_type = db.Column(db.String(8), nullable=False, default="none")
+    shuffle_questions = db.Column(db.Boolean, nullable=False, default=False)
     questions = db.relationship("Question", backref="survey", order_by="Question.position", cascade="all,delete-orphan")
 
 class Question(db.Model):
@@ -91,6 +115,16 @@ class Question(db.Model):
     text = db.Column(db.Text, nullable=False)
     position = db.Column(db.Integer, default=0)
     active = db.Column(db.Boolean, default=True)
+    answer_type = db.Column(db.String(20), nullable=False, default="rating")
+    notice = db.Column(db.Text, default="")
+    choices = db.Column(db.Text, nullable=False, default="[]")
+    @property
+    def choice_options(self):
+        try:
+            items = json.loads(self.choices or "[]")
+            return [str(item) for item in items if isinstance(item, str)] if isinstance(items, list) else []
+        except (TypeError, ValueError):
+            return []
 
 class Merchant(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -111,11 +145,25 @@ class Response(db.Model):
     email_sent = db.Column(db.Boolean, default=False)
     answers = db.relationship("Answer", backref="response", cascade="all,delete-orphan")
 
+class RespondentIdentity(db.Model):
+    """Dados identificáveis, armazenados sem relação com respostas individuais."""
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
+    document_type = db.Column(db.String(8), nullable=False, default="none")
+    document_number = db.Column(db.String(18), default="")
+    eligibility_cnpj = db.Column(db.String(14), default="")
+    token_hash = db.Column(db.String(64), unique=True, nullable=True)
+    store_name = db.Column(db.String(180), default="")
+    owner_name = db.Column(db.String(180), default="")
+    email = db.Column(db.String(255), default="")
+    submitted_at = db.Column(db.DateTime(timezone=True), default=now)
+
 class Answer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     response_id = db.Column(db.Integer, db.ForeignKey("response.id"), nullable=False)
     question_id = db.Column(db.Integer, db.ForeignKey("question.id"), nullable=False)
     rating = db.Column(db.Integer, nullable=False)
+    answer_text = db.Column(db.Text)
 
 class Audit(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -148,6 +196,14 @@ def roles(*allowed):
             return fn(*args, **kwargs)
         return inner
     return outer
+
+@app.template_filter("choice_values")
+def choice_values(value):
+    try:
+        choices = json.loads(value or "[]")
+        return ", ".join(str(item) for item in choices) if isinstance(choices, list) else ""
+    except (TypeError, ValueError):
+        return ""
 
 @app.context_processor
 def globals_for_templates():
@@ -188,13 +244,29 @@ def dashboard():
     # Agregação no banco e limiar mínimo contra reidentificação de respostas.
     rows = (db.session.query(Survey.title, Question.sector, db.func.count(Answer.id), db.func.avg(Answer.rating))
             .join(Question, Question.survey_id == Survey.id)
-            .outerjoin(Answer, Answer.question_id == Question.id)
-            .filter(Question.sector.in_(accessible))
+            .outerjoin(Answer, db.and_(Answer.question_id == Question.id, Answer.rating.between(1, 5)))
+            .filter(Question.answer_type == "rating", Question.sector.in_(accessible))
             .group_by(Survey.id, Question.sector).order_by(Survey.id.desc()).all()) if accessible else []
     stats = [{"survey": a, "sector": b, "count": int(c), "avg": round(float(d), 2) if c >= 3 and d is not None else None} for a,b,c,d in rows]
     log("dashboard_view", ",".join(accessible))
     db.session.commit()
     return render_template("dashboard.html", stats=stats, surveys=Survey.query.all() if current_user.role == "master" else [])
+
+
+@app.get("/dashboard/print")
+@login_required
+def print_dashboard():
+    accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
+    rows = (db.session.query(Survey.title, Question.sector, db.func.count(Answer.id), db.func.avg(Answer.rating))
+            .join(Question, Question.survey_id == Survey.id)
+            .outerjoin(Answer, db.and_(Answer.question_id == Question.id, Answer.rating.between(1, 5)))
+            .filter(Question.answer_type == "rating", Question.sector.in_(accessible))
+            .group_by(Survey.id, Question.sector).order_by(Survey.id.desc()).all()) if accessible else []
+    stats = [{"survey": a, "sector": b, "count": int(c), "avg": round(float(d), 2) if c >= 3 and d is not None else None} for a,b,c,d in rows]
+    layout = request.args.get("format") if request.args.get("format") in ("cards", "bi") else "cards"
+    log("dashboard_print", layout)
+    db.session.commit()
+    return render_template("dashboard_print.html", stats=stats, layout=layout, generated_at=now())
 
 @app.route("/admin/surveys", methods=["GET", "POST"])
 @roles("master")
@@ -206,12 +278,49 @@ def manage_surveys():
             flash("Informe título e slug exclusivo.", "error")
         else:
             s = Survey(title=title[:200], slug=slug[:120], description=request.form.get("description", "")[:2000],
-                       target=request.form.get("target") if request.form.get("target") in ("lojista", "publico") else "lojista")
+                       target=request.form.get("target") if request.form.get("target") in ("lojista", "publico") else "lojista",
+                       identity_type=("cnpj" if request.form.get("target") == "lojista" else "none"))
             db.session.add(s)
             log("survey_create", slug)
             db.session.commit()
             return redirect(url_for("edit_survey", sid=s.id))
     return render_template("surveys.html", surveys=Survey.query.order_by(Survey.id.desc()).all())
+
+@app.post("/admin/surveys/<int:sid>/delete")
+@roles("master")
+def delete_survey(sid):
+    survey = db.get_or_404(Survey, sid)
+    registered_identity = RespondentIdentity.query.filter(
+        RespondentIdentity.survey_id == sid,
+        db.or_(
+            RespondentIdentity.document_type.in_(("cpf", "cnpj")),
+            db.and_(RespondentIdentity.document_number.isnot(None), RespondentIdentity.document_number != ""),
+            db.and_(RespondentIdentity.eligibility_cnpj.isnot(None), RespondentIdentity.eligibility_cnpj != "")
+        )
+    ).first()
+    legacy_document = Response.query.filter(
+        Response.survey_id == sid,
+        db.or_(
+            db.and_(Response.cnpj.isnot(None), Response.cnpj != ""),
+            Response.merchant_id.isnot(None)
+        )
+    ).first()
+    if registered_identity or legacy_document:
+        flash("A pesquisa não pode ser excluída: há CPF ou CNPJ registrado.", "error")
+        return redirect(url_for("manage_surveys"))
+    question_ids = [q.id for q in survey.questions]
+    response_ids = [r.id for r in Response.query.filter_by(survey_id=sid).all()]
+    if question_ids:
+        Answer.query.filter(Answer.question_id.in_(question_ids)).delete(synchronize_session=False)
+    if response_ids:
+        Answer.query.filter(Answer.response_id.in_(response_ids)).delete(synchronize_session=False)
+    Response.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    RespondentIdentity.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    log("survey_delete", "survey:" + str(sid))
+    db.session.delete(survey)
+    db.session.commit()
+    flash("Pesquisa e resultados excluídos. Nenhum CPF ou CNPJ estava registrado.", "success")
+    return redirect(url_for("manage_surveys"))
 
 @app.route("/admin/surveys/<int:sid>", methods=["GET", "POST"])
 @roles("master")
@@ -224,13 +333,32 @@ def edit_survey(sid):
             survey.description = request.form.get("description", "")[:2000]
             survey.target = request.form.get("target") if request.form.get("target") in ("lojista", "publico") else survey.target
             survey.active = request.form.get("active") == "on"
+            if request.form.get("identity_type") in ("none", "cpf", "cnpj"):
+                survey.identity_type = request.form.get("identity_type")
+            survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
             log("survey_update", str(sid))
         elif kind == "question":
             sector = request.form.get("sector")
             text = request.form.get("text", "").strip()
-            if sector in SECTORS and text:
-                db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1))
+            answer_type = request.form.get("answer_type") if request.form.get("answer_type") in ("rating", "open", "single", "multiple") else "rating"
+            notice = request.form.get("notice", "").strip()[:500]
+            choices = parse_choices(request.form.get("choices", "")) if answer_type in ("single", "multiple") else []
+            if answer_type in ("single", "multiple") and choices is None:
+                flash("Informe de 2 a 20 opções exclusivas, uma por linha, com até 200 caracteres cada.", "error")
+            elif sector in SECTORS and text:
+                db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False)))
                 log("question_create", str(sid))
+        elif kind == "move_question":
+            q = db.get_or_404(Question, int(request.form.get("question_id", 0)))
+            if q.survey_id != sid:
+                abort(403)
+            ordered = list(survey.questions)
+            index = ordered.index(q)
+            target_index = index - 1 if request.form.get("direction") == "up" else index + 1
+            if 0 <= target_index < len(ordered):
+                other = ordered[target_index]
+                q.position, other.position = other.position, q.position
+                log("question_reorder", str(sid))
         elif kind == "edit_question":
             q = db.get_or_404(Question, int(request.form.get("question_id", 0)))
             if q.survey_id != sid:
@@ -244,6 +372,19 @@ def edit_survey(sid):
             else:
                 q.text = request.form.get("text", q.text)[:1000]
                 q.active = request.form.get("active") == "on"
+                q.notice = request.form.get("notice", "").strip()[:500]
+                if request.form.get("answer_type") in ("rating", "open", "single", "multiple"):
+                    new_type = request.form.get("answer_type")
+                    has_answers = Answer.query.filter_by(question_id=q.id).first() is not None
+                    new_choices = parse_choices(request.form.get("choices", "")) if new_type in ("single", "multiple") else []
+                    choices_changed = new_choices is None or new_choices != q.choice_options
+                    if new_type in ("single", "multiple") and new_choices is None:
+                        flash("Informe de 2 a 20 opções exclusivas, uma por linha, com até 200 caracteres cada.", "error")
+                    elif has_answers and (new_type != q.answer_type or choices_changed):
+                        flash("O tipo e as opções não podem ser alterados porque esta pergunta já recebeu respostas.", "error")
+                    else:
+                        q.answer_type = new_type
+                        q.choices = json.dumps(new_choices, ensure_ascii=False)
                 log("question_update", str(q.id))
         db.session.commit()
         return redirect(url_for("edit_survey", sid=sid))
@@ -289,6 +430,34 @@ def users():
             return redirect(url_for("users"))
     return render_template("users.html", users=User.query.order_by(User.username).all(), roles=ROLES)
 
+@app.post("/admin/users/<int:uid>/edit")
+@roles("master")
+def edit_user(uid):
+    user = db.get_or_404(User, uid)
+    username = request.form.get("username", "").strip()
+    role = request.form.get("role", "")
+    password = request.form.get("password", "")
+    duplicate = User.query.filter(User.username == username, User.id != uid).first() if username else None
+    if not username or len(username) > 90 or duplicate or role not in ROLES:
+        flash("Informe um usuário exclusivo de até 90 caracteres e um perfil válido.", "error")
+        return redirect(url_for("users"))
+    if password and len(password) < 12:
+        flash("A nova senha deve ter pelo menos 12 caracteres.", "error")
+        return redirect(url_for("users"))
+    if user.id == current_user.id and (role != "master" or request.form.get("active") != "on"):
+        flash("Não é permitido remover ou desativar seu próprio perfil Master.", "error")
+        return redirect(url_for("users"))
+    user.username = username
+    user.role = role
+    if user.id != current_user.id:
+        user.active = request.form.get("active") == "on"
+    if password:
+        user.password_hash = generate_password_hash(password)
+    log("user_update", str(uid) + ":" + role)
+    db.session.commit()
+    flash("Cadastro do usuário atualizado.", "success")
+    return redirect(url_for("users"))
+
 @app.post("/admin/users/<int:uid>/toggle")
 @roles("master")
 def toggle_user(uid):
@@ -303,7 +472,7 @@ def toggle_user(uid):
 @app.get("/admin/responses")
 @roles("master")
 def admin_responses():
-    records = Response.query.order_by(Response.submitted_at.desc()).limit(500).all()
+    records = Response.query.filter(db.or_(Response.store_name.isnot(None), Response.owner_name.isnot(None), Response.email.isnot(None), Response.cnpj.isnot(None))).order_by(Response.submitted_at.desc()).limit(500).all()
     log("pii_access", "response_list")
     db.session.commit()
     return render_template("responses.html", records=records)
@@ -314,7 +483,30 @@ def response_detail(rid):
     record = db.get_or_404(Response, rid)
     log("pii_access", "response:" + str(rid))
     db.session.commit()
-    return render_template("response_detail.html", record=record, answers=[(db.session.get(Question, a.question_id), a.rating) for a in record.answers])
+    return render_template("response_detail.html", record=record, answers=[(db.session.get(Question, a.question_id), a) for a in record.answers])
+
+@app.get("/admin/open-answers")
+@roles("master")
+def open_answers():
+    rows = (db.session.query(Answer, Question, Response.submitted_at)
+            .join(Question, Question.id == Answer.question_id)
+            .join(Response, Response.id == Answer.response_id)
+            .filter(Question.answer_type == "open", Answer.answer_text.isnot(None))
+            .order_by(Response.submitted_at.desc()).limit(1000).all())
+    log("open_answers_access", "anonymous_answers")
+    db.session.commit()
+    return render_template("open_answers.html", records=rows)
+
+@app.get("/admin/identities")
+@roles("master")
+def identities():
+    rows = (db.session.query(RespondentIdentity, Survey.title)
+            .join(Survey, Survey.id == RespondentIdentity.survey_id)
+            .filter(RespondentIdentity.token_hash.is_(None))
+            .order_by(RespondentIdentity.submitted_at.desc()).limit(500).all())
+    log("identity_access", "identity_list")
+    db.session.commit()
+    return render_template("identities.html", records=rows)
 
 @app.get("/audit")
 @roles("master", "auditoria")
@@ -346,7 +538,36 @@ def public_survey(slug):
                 flash("Preencha nome da loja e e-mail válido.", "error")
             else:
                 token = secrets.token_urlsafe(20)
-                session["survey_state"] = {"survey": s.id, "token": token, "identity": info, "merchant_id": matched.id if matched else None}
+                
+                if s.identity_type in ("cpf", "cnpj"):
+                    doc = re.sub(r"\D", "", request.form.get("document_number", "") or request.form.get("cnpj", ""))
+                    valid = (len(doc) == 11 and valid_cpf(doc)) if s.identity_type == "cpf" else valid_cnpj(doc)
+                    if not valid:
+                        flash("Informe um " + s.identity_type.upper() + " válido.", "error")
+                        return render_template("identity.html", survey=s)
+                    info["document_type"], info["document_number"] = s.identity_type, doc
+                else:
+                    info["document_type"], info["document_number"] = "none", ""
+                db.session.query(RespondentIdentity).filter(
+                    RespondentIdentity.token_hash.isnot(None),
+                    RespondentIdentity.submitted_at < now() - timedelta(hours=24)
+                ).delete(synchronize_session=False)
+                pending = RespondentIdentity(
+                    survey_id=s.id,
+                    document_type=info.get("document_type", "none"),
+                    document_number=info.get("document_number", ""),
+                    eligibility_cnpj=cnpj_digits(info.get("cnpj", "")),
+                    store_name=info.get("store_name", ""),
+                    owner_name=info.get("owner_name", ""),
+                    email=info.get("email", ""),
+                    token_hash=hashlib.sha256(token.encode()).hexdigest()
+                )
+                db.session.add(pending)
+                db.session.commit()
+                session["survey_state"] = {"survey": s.id, "token": token, "merchant_id": matched.id if matched else None,
+                                           "question_order": [q.id for q in questions]}
+                if s.shuffle_questions:
+                    random.shuffle(session["survey_state"]["question_order"])
                 return redirect(url_for("answer_survey", slug=slug))
     return render_template("identity.html", survey=s)
 
@@ -357,59 +578,77 @@ def answer_survey(slug):
     state = session.get("survey_state") or {}
     if state.get("survey") != s.id:
         return redirect(url_for("public_survey", slug=slug))
+    pending_identity = RespondentIdentity.query.filter_by(token_hash=hashlib.sha256(state.get("token", "").encode()).hexdigest(), survey_id=s.id).first()
+    if not pending_identity:
+        session.pop("survey_state", None)
+        return redirect(url_for("public_survey", slug=slug))
     questions = [q for q in s.questions if q.active]
     if not questions:
         abort(404)
+    order = state.get("question_order", [])
+    positions = {qid: index for index, qid in enumerate(order)}
+    questions.sort(key=lambda q: positions.get(q.id, len(positions) + q.position))
     if request.method == "POST":
-        ratings = {}
+        answers = {}
         for q in questions:
-            raw = request.form.get("q_" + str(q.id), "")
-            if raw not in ("1", "2", "3", "4", "5"):
-                flash("Responda todas as perguntas antes de confirmar.", "error")
-                return render_template("answer.html", survey=s, questions=questions, values=request.form)
-            ratings[q.id] = int(raw)
+            raw = request.form.get("q_" + str(q.id), "").strip()
+            if q.answer_type in ("single", "multiple"):
+                selected = request.form.getlist("q_" + str(q.id))
+                options = q.choice_options
+                if (q.answer_type == "single" and len(selected) != 1) or (q.answer_type == "multiple" and not selected) or any(value not in options for value in selected):
+                    flash("Selecione uma ou mais opções válidas para continuar.", "error")
+                    return render_template("answer.html", survey=s, questions=questions, values=request.form)
+                answers[q.id] = {"rating": 0, "text": json.dumps(selected, ensure_ascii=False)}
+            elif q.answer_type == "open":
+                if not raw or len(raw) > 5000:
+                    flash("Responda cada pergunta aberta com até 5.000 caracteres.", "error")
+                    return render_template("answer.html", survey=s, questions=questions, values=request.form)
+                answers[q.id] = {"rating": 0, "text": raw}
+            else:
+                if raw not in ("1", "2", "3", "4", "5", "na"):
+                    flash("Responda todas as perguntas antes de confirmar.", "error")
+                    return render_template("answer.html", survey=s, questions=questions, values=request.form)
+                answers[q.id] = {"rating": 0 if raw == "na" else int(raw), "text": None}
         if request.form.get("confirm") != "yes":
             flash("Confirme suas respostas na última etapa.", "error")
             return render_template("answer.html", survey=s, questions=questions, values=request.form)
         # Revalidação no servidor da lista de acesso, inclusive após voltar pelo navegador.
         merchant = db.session.get(Merchant, state.get("merchant_id")) if state.get("merchant_id") else None
+        identity = pending_identity
         if s.target == "lojista" and (not merchant or not merchant.enabled or
-            cnpj_digits(state["identity"].get("cnpj")) != merchant.cnpj or
-            not hmac.compare_digest(clean_name(state["identity"].get("owner_name")), clean_name(merchant.owner_name))):
+            cnpj_digits(identity.eligibility_cnpj) != merchant.cnpj or
+            not hmac.compare_digest(clean_name(identity.owner_name), clean_name(merchant.owner_name))):
             log("audience_denied", "survey:" + str(s.id))
             db.session.commit()
             session.pop("survey_state", None)
             return render_template("thanks.html", sent=False)
-        identity = state["identity"]
-        resp = Response(survey_id=s.id, merchant_id=merchant.id if merchant else None,
-                        store_name=identity.get("store_name"), email=identity.get("email"),
-                        owner_name=identity.get("owner_name"), cnpj=cnpj_digits(identity.get("cnpj")))
+        resp = Response(survey_id=s.id)
         db.session.add(resp)
+        identity.token_hash = None
+        identity.submitted_at = now()
         db.session.flush()
         for q in questions:
-            db.session.add(Answer(response_id=resp.id, question_id=q.id, rating=ratings[q.id]))
+            item = answers[q.id]
+            db.session.add(Answer(response_id=resp.id, question_id=q.id, rating=item["rating"], answer_text=item["text"]))
         log("survey_submitted", "survey:" + str(s.id))
         db.session.commit()
         session.pop("survey_state", None)
-        sent = send_receipt(resp, s, questions, ratings)
+        sent = send_receipt(resp, s, questions, answers, identity.email or "")
         if sent:
             resp.email_sent = True
             db.session.commit()
         return render_template("thanks.html", sent=sent)
-    return render_template("answer.html", survey=s, questions=questions, values={})
+    return render_template("answer.html", survey=s, questions=questions, values=request.form)
 
-def send_receipt(resp, survey, questions, ratings):
+def send_receipt(resp, survey, questions, answers, email):
     host = os.environ.get("SMTP_HOST")
-    if not host or not resp.email:
+    if not host or not email:
         return False
     msg = EmailMessage()
     msg["Subject"] = "Obrigado por participar — " + survey.title
     msg["From"] = os.environ.get("SMTP_FROM", "pesquisa@example.invalid")
-    msg["To"] = resp.email
-    lines = ["Obrigado por participar da pesquisa!", "", survey.title, "",
-             "Segue o comprovante das suas avaliações:"]
-    lines += [q.sector + " — " + q.text + ": " + str(ratings[q.id]) + "/5" for q in questions]
-    msg.set_content("\n".join(lines))
+    msg["To"] = email
+    msg.set_content("Obrigado por participar da pesquisa " + survey.title + ". Seus dados de identificação são armazenados separadamente e não são vinculados às respostas individuais.")
     try:
         port = int(os.environ.get("SMTP_PORT", "587"))
         with smtplib.SMTP(host, port, timeout=12) as smtp:
@@ -423,14 +662,56 @@ def send_receipt(resp, survey, questions, ratings):
         app.logger.exception("Falha ao enviar recibo de pesquisa")
         return False
 
+
+def ensure_schema():
+    """Create new tables and add optional fields without replacing existing data."""
+    guard = db.engine.connect()
+    guarded = db.engine.dialect.name == "postgresql"
+    try:
+        if guarded:
+            guard.execute(text("SELECT pg_advisory_lock(74120261027)"))
+            guard.commit()
+        db.create_all()
+        with db.engine.begin() as connection:
+            tables = set(inspect(connection).get_table_names())
+            additions = {
+            "survey": {
+                "identity_type": "VARCHAR(8) NOT NULL DEFAULT 'none'",
+                "shuffle_questions": "BOOLEAN NOT NULL DEFAULT FALSE",
+            },
+            "question": {
+                "answer_type": "VARCHAR(20) NOT NULL DEFAULT 'rating'",
+                "notice": "TEXT NOT NULL DEFAULT ''",
+            "choices": "TEXT NOT NULL DEFAULT '[]'",
+            },
+            "answer": {"answer_text": "TEXT"},
+            "respondent_identity": {
+                "eligibility_cnpj": "VARCHAR(14) NOT NULL DEFAULT ''",
+                "token_hash": "VARCHAR(64)",
+            },
+        }
+            for table, columns in additions.items():
+                if table not in tables:
+                    continue
+                existing = {column["name"] for column in inspect(connection).get_columns(table)}
+                for name, declaration in columns.items():
+                    if name not in existing:
+                        connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {declaration}'))
+                        existing.add(name)
+    finally:
+        if guarded:
+            guard.execute(text("SELECT pg_advisory_unlock(74120261027)"))
+            guard.commit()
+        guard.close()
+
 @app.cli.command("init-db")
 def init_db():
-    db.create_all()
-    print("Tabelas criadas.")
+    ensure_schema()
+    print("Estrutura do banco atualizada sem remover dados.")
 
 @app.cli.command("create-master")
 def create_master():
-    db.create_all()
+    ensure_schema()
     username = os.environ.get("MASTER_USERNAME")
     password = os.environ.get("MASTER_PASSWORD")
     if not username or not password or len(password) < 12:
@@ -529,3 +810,7 @@ def seed_survey():
             db.session.add(Question(survey_id=survey.id, sector=sector, text=question_text, position=order))
     db.session.commit()
     print("Pesquisa criada com", order, "perguntas. Cadastre lojistas e abra-a no Master.")
+
+# Migração aditiva e idempotente ao iniciar, preservando os registros existentes.
+with app.app_context():
+    ensure_schema()

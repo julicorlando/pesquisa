@@ -7,7 +7,7 @@
   <meta name="description" content="Pesquisa de satisfação do Shopping Carpina.">
   <title>{% block title %}Pesquisa | Shopping Carpina{% endblock %}</title>
   <link rel="icon" type="image/png" href="{{ url_for('static', filename='shopping-carpina-mark.png') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261027-brand') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261027-survey-features') }}">
 </head>
 <body>
   <header class="top">
@@ -23,7 +23,9 @@
           <a href="{{ url_for('manage_surveys') }}">Pesquisas</a>
           <a href="{{ url_for('merchants') }}">Lojistas</a>
           <a href="{{ url_for('users') }}">Usuários</a>
-          <a href="{{ url_for('admin_responses') }}">Respostas</a>
+          <a href="{{ url_for('admin_responses') }}">Respostas antigas</a>
+          <a href="{{ url_for('identities') }}">Identificações</a>
+          <a href="{{ url_for('open_answers') }}">Respostas abertas</a>
         {% endif %}
         {% if current_user.role in ('master','auditoria') %}
           <a href="{{ url_for('audit') }}">Auditoria</a>
@@ -48,7 +50,7 @@
   <footer>
     <span class="footer-accent" aria-hidden="true"></span>
     <p>Shopping Carpina · Pesquisa de satisfação</p>
-    <small>Seus dados são tratados com acesso restrito.</small>
+    <small>Identificação separada das respostas individuais.</small>
   </footer>
 </body>
 </html>

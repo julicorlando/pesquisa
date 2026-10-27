@@ -1,1 +1,13 @@
-{% extends "base.html" %}{% block content %}<div class="card narrow"><div class="eyebrow">PESQUISA DE SATISFAÇÃO</div><h1>{{survey.title}}</h1><p>{{survey.description}}</p><p>Suas informações de identificação ficam restritas à Administração Master; os demais setores visualizam apenas resultados agregados.</p><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="stage" value="identity">{% if survey.target == 'lojista' %}<label>Nome da loja<input name="store_name" required maxlength="180"></label><label>E-mail para recibo<input name="email" type="email" required maxlength="255"></label><label>CNPJ da loja *<input name="cnpj" required inputmode="numeric" maxlength="18"></label><label>Nome completo do responsável *<input name="owner_name" required maxlength="180"></label><small>* Usados para validar elegibilidade.</small>{% else %}<label>Nome (opcional)<input name="owner_name"></label><label>E-mail para recibo (opcional)<input name="email" type="email"></label>{% endif %}<button class="btn full">Continuar</button></form></div>{% endblock %}
+{% extends "base.html" %}{% block content %}
+<div class="card narrow"><div class="eyebrow">PESQUISA DE SATISFAÇÃO</div><h1>{{ survey.title }}</h1><p>{{ survey.description }}</p>
+<div class="notice privacy-notice"><strong>Privacidade:</strong> os dados de identificação solicitados nesta pesquisa são armazenados separadamente. Eles não ficam vinculados às respostas de cada pergunta nem aparecem nos indicadores. O acesso à identificação é restrito ao Master.</div>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="stage" value="identity">
+{% if survey.target == 'lojista' %}
+<label>Nome da loja<input name="store_name" required maxlength="180"></label><label>E-mail para recibo<input name="email" type="email" required maxlength="255"></label>
+<label>CNPJ da loja para validar elegibilidade<input name="cnpj" required inputmode="numeric" maxlength="18"></label><label>Nome completo do responsável *<input name="owner_name" required maxlength="180"></label><small>* Usados para validar elegibilidade.</small>
+{% if survey.identity_type == 'cpf' %}<label>CPF solicitado nesta pesquisa<input name="document_number" required inputmode="numeric" maxlength="14"></label>{% endif %}
+{% else %}
+{% if survey.identity_type in ('cpf','cnpj') %}<label>{{ survey.identity_type|upper }} solicitado nesta pesquisa<input name="document_number" required inputmode="numeric" maxlength="18"></label>{% endif %}
+<label>Nome (opcional)<input name="owner_name" maxlength="180"></label><label>E-mail para recibo (opcional)<input name="email" type="email" maxlength="255"></label>
+{% endif %}
+<button class="btn full">Continuar</button></form></div>{% endblock %}
