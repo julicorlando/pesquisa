@@ -25,14 +25,18 @@
 <div class="cards">
 {% for detail in question_details %}
   <section class="card">
-    <small>{{ detail.question.sector }} · {{ detail.count }} resposta(s)</small>
+    <small>{{ detail.question.sector }} · {% if detail.count < 3 %}menos de 3 respostas{% else %}{{ detail.count }} resposta(s){% endif %}</small>
     <h3>{{ detail.question.text }}</h3>
     {% if detail.question.answer_type in ('rating','nps') %}
-      {% if detail.question.answer_type=='rating' %}<p>Média das respostas válidas: <strong>{{ detail.average if detail.average is not none else '—' }}</strong> / 5</p>{% else %}<p>NPS: <strong>{{ detail.nps if detail.nps is not none else '—' }}</strong></p>{% endif %}
-      <div class="tablewrap"><table><thead><tr><th>Resposta</th><th>Quantidade</th></tr></thead><tbody>{% for row in detail.distribution %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td></tr>{% endfor %}{% if detail.not_applicable %}<tr><td>Não se aplica / Não sei avaliar</td><td>{{ detail.not_applicable }}</td></tr>{% endif %}</tbody></table></div>
+      {% if detail.distribution_suppressed %}<p class="muted">Distribuição e indicador aparecem após pelo menos 3 respostas.</p>{% else %}
+        {% if detail.question.answer_type=='rating' %}<p>Média das respostas válidas: <strong>{{ detail.average if detail.average is not none else '—' }}</strong> / 5</p>{% else %}<p>NPS: <strong>{{ detail.nps if detail.nps is not none else '—' }}</strong></p>{% endif %}
+        <div class="tablewrap"><table><thead><tr><th>Resposta</th><th>Quantidade</th></tr></thead><tbody>{% for row in detail.distribution %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td></tr>{% endfor %}{% if detail.not_applicable %}<tr><td>Não se aplica / Não sei avaliar</td><td>{{ detail.not_applicable }}</td></tr>{% endif %}</tbody></table></div>
+      {% endif %}
     {% elif detail.question.answer_type in ('single','multiple') %}
-      <p>Distribuição das opções selecionadas{% if detail.question.answer_type=='multiple' %} (uma resposta pode selecionar várias opções){% endif %}:</p>
-      <div class="tablewrap"><table><thead><tr><th>Opção</th><th>Quantidade</th></tr></thead><tbody>{% for row in detail.distribution %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td></tr>{% endfor %}</tbody></table></div>
+      {% if detail.distribution_suppressed %}<p class="muted">Distribuição aparece após pelo menos 3 respostas.</p>{% else %}
+        <p>Distribuição das opções selecionadas{% if detail.question.answer_type=='multiple' %} (uma resposta pode selecionar várias opções){% endif %}:</p>
+        <div class="tablewrap"><table><thead><tr><th>Opção</th><th>Quantidade</th></tr></thead><tbody>{% for row in detail.distribution %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td></tr>{% endfor %}</tbody></table></div>
+      {% endif %}
     {% elif detail.hidden_text %}
       <p class="muted">O texto das respostas abertas deste setor está disponível somente ao Master.</p>
     {% else %}

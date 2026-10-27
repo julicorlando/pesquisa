@@ -409,7 +409,8 @@ def dashboard_question_details(survey_id, accessible, sector, date_from, date_to
         if date_to:
             answers_query = answers_query.filter(Response.submitted_at < datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1))
         rows = answers_query.order_by(Response.submitted_at.desc()).all()
-        item = {"question": question, "count": len(rows), "distribution": [], "open_answers": [], "hidden_text": False}
+        item = {"question": question, "count": len(rows), "distribution": [], "open_answers": [], "hidden_text": False,
+                "distribution_suppressed": len(rows) < 3}
         if question.answer_type in ("rating", "nps"):
             labels = range(1, 6) if question.answer_type == "rating" else range(0, 11)
             counts = {value: 0 for value in labels}
@@ -421,8 +422,9 @@ def dashboard_question_details(survey_id, accessible, sector, date_from, date_to
                     counts[answer.rating] += 1
             item["distribution"] = [{"label": str(value), "count": counts[value]} for value in counts]
             item["not_applicable"] = not_applicable
-            item["average"] = round(sum(value * count for value, count in counts.items()) / sum(counts.values()), 2) if question.answer_type == "rating" and sum(counts.values()) else None
-            item["nps"] = round((sum(counts[value] for value in range(9, 11)) - sum(counts[value] for value in range(0, 7))) / sum(counts.values()) * 100) if question.answer_type == "nps" and sum(counts.values()) else None
+            valid_count = sum(counts.values())
+            item["average"] = round(sum(value * count for value, count in counts.items()) / valid_count, 2) if question.answer_type == "rating" and valid_count >= 3 else None
+            item["nps"] = round((sum(counts[value] for value in range(9, 11)) - sum(counts[value] for value in range(0, 7))) / valid_count * 100) if question.answer_type == "nps" and valid_count >= 3 else None
         elif question.answer_type in ("single", "multiple"):
             counts = {option: 0 for option in question.choice_options}
             for answer, *_ in rows:

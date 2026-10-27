@@ -199,13 +199,14 @@ def test_dashboard_drilldown_shows_question_level_distributions(client):
         choice = Question(survey_id=survey.id, sector="Geral", text="Opção", position=2, answer_type="single", choices='["Sim", "Não"]')
         opened = Question(survey_id=survey.id, sector="Geral", text="Comentário", position=3, answer_type="open")
         db.session.add_all([rating, choice, opened]); db.session.flush()
-        response = Response(survey_id=survey.id, device_submitted_at=datetime(2026, 10, 27, 14, 30, tzinfo=timezone.utc), device_timezone="America/Recife")
-        db.session.add(response); db.session.flush()
-        db.session.add_all([
-            Answer(response_id=response.id, question_id=rating.id, rating=4),
-            Answer(response_id=response.id, question_id=choice.id, rating=0, answer_text='["Sim"]'),
-            Answer(response_id=response.id, question_id=opened.id, rating=0, answer_text="Bom atendimento"),
-        ])
+        for _ in range(3):
+            response = Response(survey_id=survey.id, device_submitted_at=datetime(2026, 10, 27, 14, 30, tzinfo=timezone.utc), device_timezone="America/Recife")
+            db.session.add(response); db.session.flush()
+            db.session.add_all([
+                Answer(response_id=response.id, question_id=rating.id, rating=4),
+                Answer(response_id=response.id, question_id=choice.id, rating=0, answer_text='["Sim"]'),
+                Answer(response_id=response.id, question_id=opened.id, rating=0, answer_text="Bom atendimento"),
+            ])
         db.session.commit()
     signin(client, "master", "long-test-pass")
     page = client.get("/dashboard?survey=1")
