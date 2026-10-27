@@ -20,23 +20,38 @@
     <nav aria-label="Navegação principal">
       {% if current_user.is_authenticated %}
         <a href="{{ url_for('dashboard') }}">Indicadores</a>
-        <a href="{{ url_for('action_plans') }}">Planos de ação</a>
-        <a href="{{ url_for('manage_surveys') }}">Pesquisas</a>
+        <details class="nav-menu">
+          <summary>Pesquisas</summary>
+          <div class="nav-submenu">
+            <a href="{{ url_for('manage_surveys') }}">Gerenciar pesquisas</a>
+            <a href="{{ url_for('open_answers') }}">Respostas abertas e escolhas</a>
+            {% if current_user.role == 'master' %}<a href="{{ url_for('admin_responses') }}">Respostas antigas</a>{% endif %}
+          </div>
+        </details>
+        <details class="nav-menu">
+          <summary>Acompanhamento</summary>
+          <div class="nav-submenu">
+            <a href="{{ url_for('action_plans') }}">Planos de ação</a>
+            {% if current_user.role == 'master' %}
+              <a href="{{ url_for('manage_goals') }}">Metas por setor</a>
+              <a href="{{ url_for('manage_report_schedules') }}">Relatórios agendados</a>
+              <a href="{{ url_for('configure_alerts') }}">Limites dos alertas</a>
+            {% endif %}
+            {% if current_user.role in ('master','auditoria') %}<a href="{{ url_for('audit') }}">Auditoria</a>{% endif %}
+          </div>
+        </details>
         {% if current_user.role == 'master' %}
-          <a href="{{ url_for('manage_goals') }}">Metas por setor</a>
-          <a href="{{ url_for('manage_report_schedules') }}">Relatórios agendados</a>
-          <a href="{{ url_for('configure_alerts') }}">Limites dos alertas</a>
-          <a href="{{ url_for('merchants') }}">Lojistas</a>
-          <a href="{{ url_for('users') }}">Usuários</a>
-          <a href="{{ url_for('admin_responses') }}">Respostas antigas</a>
-          <a href="{{ url_for('identities') }}">Identificações</a>
-          <a href="{{ url_for('participant_followups') }}">Retornos solicitados</a>
-          <a href="{{ url_for('smtp_settings') }}">Configuração SMTP</a>
-          <a href="{{ url_for('system_health') }}">Saúde do sistema</a>
-        {% endif %}
-        <a href="{{ url_for('open_answers') }}">Respostas abertas e escolhas</a>
-        {% if current_user.role in ('master','auditoria') %}
-          <a href="{{ url_for('audit') }}">Auditoria</a>
+          <details class="nav-menu">
+            <summary>Administração</summary>
+            <div class="nav-submenu">
+              <a href="{{ url_for('merchants') }}">Lojistas</a>
+              <a href="{{ url_for('users') }}">Usuários</a>
+              <a href="{{ url_for('identities') }}">Identificações</a>
+              <a href="{{ url_for('participant_followups') }}">Retornos solicitados</a>
+              <a href="{{ url_for('smtp_settings') }}">Configuração SMTP</a>
+              <a href="{{ url_for('system_health') }}">Saúde do sistema</a>
+            </div>
+          </details>
         {% endif %}
         <form method="post" action="{{ url_for('logout') }}" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
