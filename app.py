@@ -193,6 +193,7 @@ class Survey(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), default=now)
     identity_type = db.Column(db.String(8), nullable=False, default="none")
     whatsapp_mode = db.Column(db.String(12), nullable=False, default="none")
+    followup_enabled = db.Column(db.Boolean, nullable=False, default=True)
     shuffle_questions = db.Column(db.Boolean, nullable=False, default=False)
     starts_at = db.Column(db.DateTime(timezone=True))
     ends_at = db.Column(db.DateTime(timezone=True))
@@ -1344,6 +1345,7 @@ def edit_survey(sid):
                 response_limit = request.form.get("response_limit", "none")
                 reminder_delay_days = int(request.form.get("reminder_delay_days", "3"))
                 automatic_reminders = request.form.get("automatic_reminders") == "on"
+                followup_enabled = request.form.get("followup_enabled") == "on"
                 if not 1 <= reminder_delay_days <= 30:
                     raise ValueError("Escolha o prazo de lembrete entre 1 e 30 dias.")
                 if starts_at and ends_at and starts_at >= ends_at:
@@ -1359,7 +1361,7 @@ def edit_survey(sid):
             else:
                 before = {
                     "title": survey.title, "description": survey.description or "", "target": survey.target,
-                    "active": survey.active, "identity_type": survey.identity_type, "whatsapp_mode": survey.whatsapp_mode, "response_limit": survey.response_limit,
+                    "active": survey.active, "identity_type": survey.identity_type, "whatsapp_mode": survey.whatsapp_mode, "followup_enabled": survey.followup_enabled, "response_limit": survey.response_limit,
                     "automatic_reminders": survey.automatic_reminders, "reminder_delay_days": survey.reminder_delay_days,
                     "shuffle_questions": survey.shuffle_questions, "starts_at": survey.starts_at, "ends_at": survey.ends_at,
                 }
@@ -1377,6 +1379,7 @@ def edit_survey(sid):
                             flash(warning, "warning")
                 survey.identity_type = identity_type
                 survey.whatsapp_mode = whatsapp_mode
+                survey.followup_enabled = followup_enabled
                 survey.response_limit = response_limit
                 survey.automatic_reminders = automatic_reminders
                 survey.reminder_delay_days = reminder_delay_days
@@ -2422,6 +2425,7 @@ def ensure_schema():
                 "automatic_reminders": "BOOLEAN NOT NULL DEFAULT FALSE",
                 "reminder_delay_days": "INTEGER NOT NULL DEFAULT 3",
                 "whatsapp_mode": "VARCHAR(12) NOT NULL DEFAULT 'none'",
+                "followup_enabled": "BOOLEAN NOT NULL DEFAULT TRUE",
                 "shuffle_questions": "BOOLEAN NOT NULL DEFAULT FALSE",
                 "starts_at": "TIMESTAMP WITH TIME ZONE",
                 "ends_at": "TIMESTAMP WITH TIME ZONE",

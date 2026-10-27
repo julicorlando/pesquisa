@@ -607,3 +607,28 @@ def test_survey_review_detects_duplicates_and_vague_questions(client):
         warnings=app_module.survey_publish_review(survey)
         assert any("repetida" in warning.lower() for warning in warnings)
         assert any("clara" in warning.lower() for warning in warnings)
+
+def test_survey_author_can_disable_participant_followup(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey=Survey(title="Pesquisa opcional",slug="retorno-opcional",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        db.session.add(Question(survey_id=survey.id,sector="Geral",text="Como foi sua experiência?",position=1))
+        db.session.commit()
+        sid=survey.id
+    signin(client,"master","long-test-pass")
+    page=client.get(f"/admin/surveys/{sid}")
+    assert page.status_code == 200
+    assert b"Retorno ao participante" in page.data
+    response=client.post(f"/admin/surveys/{sid}",data={
+        "kind":"settings","title":"Pesquisa opcional","description":"","target":"publico",
+        "identity_type":"none","whatsapp_mode":"none","response_limit":"none",
+        "reminder_delay_days":"3","save_draft":"yes"
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        survey=db.session.get(Survey,sid)
+        assert survey.followup_enabled is False
+    public=client.get("/p/retorno-opcional")
+    assert public.status_code == 200
+    assert b"Retorno sobre o problema relatado" not in public.data
