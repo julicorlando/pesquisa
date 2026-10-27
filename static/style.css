@@ -191,6 +191,7 @@ th { background: var(--navy); color: #fff; }
 .rating-label { color: var(--muted); font-size: 12px; }
 .rating-number { color: var(--blue); font-size: 12px; font-weight: 800; }
 .actions { display: flex; justify-content: space-between; gap: 10px; margin-top: 20px; }
+.actions [hidden] { display: none !important; }
 .review-item { padding: 15px 0; border-bottom: 1px solid #E6ECE9; }
 .review-item p { margin: 4px 0; }
 .question-step .check input { width: 20px; height: 20px; accent-color: var(--teal-dark); }
