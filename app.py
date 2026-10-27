@@ -10,6 +10,9 @@ import unicodedata
 import smtplib
 import secrets
 import random
+import calendar
+import zipfile
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from email.message import EmailMessage
@@ -90,6 +93,22 @@ app.jinja_env.filters["device_datetime"] = format_device_datetime
 def clean_name(v):
     v = unicodedata.normalize("NFKD", (v or "").strip().casefold())
     return re.sub(r"\s+", " ", "".join(c for c in v if not unicodedata.combining(c)))
+
+COMMENT_THEMES = {
+    "Estacionamento": ("estacionamento", "vaga", "carro", "cancela", "ticket"),
+    "Atendimento": ("atendimento", "atendente", "funcionario", "equipe", "demora", "fila"),
+    "Limpeza": ("limpeza", "suj", "lixo", "banheiro", "conservacao"),
+    "Segurança": ("seguranca", "seguro", "risco", "vigilante", "furto"),
+    "Acessibilidade": ("acessibilidade", "rampa", "cadeirante", "elevador", "mobilidade"),
+    "Pagamento": ("pagamento", "pagar", "pix", "cartao", "preco", "cobranca"),
+    "Infraestrutura": ("estrutura", "ar condicionado", "temperatura", "iluminacao", "wifi", "internet", "manutencao"),
+    "Alimentação": ("comida", "alimentacao", "restaurante", "praca de alimentacao", "lanchonete"),
+}
+
+def classify_comment(value):
+    normalized = clean_name(value)
+    matches = [theme for theme, words in COMMENT_THEMES.items() if any(clean_name(word) in normalized for word in words)]
+    return matches or ["Outros"]
 
 def cnpj_digits(v):
     return re.sub(r"\D", "", v or "")
@@ -175,6 +194,7 @@ class Survey(db.Model):
     shuffle_questions = db.Column(db.Boolean, nullable=False, default=False)
     starts_at = db.Column(db.DateTime(timezone=True))
     ends_at = db.Column(db.DateTime(timezone=True))
+    response_limit = db.Column(db.String(20), nullable=False, default="none")
     questions = db.relationship("Question", backref="survey", order_by="Question.position", cascade="all,delete-orphan")
 
 class Question(db.Model):
@@ -259,11 +279,25 @@ class ActionPlan(db.Model):
     due_date = db.Column(db.Date)
     created_at = db.Column(db.DateTime(timezone=True), default=now)
 
+class SurveyAlert(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    alert_key = db.Column(db.String(255), unique=True, nullable=False)
+    survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
+    question_id = db.Column(db.Integer, db.ForeignKey("question.id"), nullable=False)
+    sector = db.Column(db.String(50), nullable=False)
+    alert_type = db.Column(db.String(30), nullable=False)
+    period_key = db.Column(db.String(20), nullable=False)
+    summary = db.Column(db.String(500), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=now)
+    action_plan_id = db.Column(db.Integer, db.ForeignKey("action_plan.id"))
+
 class SurveyInvite(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
     email = db.Column(db.String(255), nullable=False)
     reminder_sent_at = db.Column(db.DateTime(timezone=True))
+    response_token_hash = db.Column(db.String(64), default="")
+    responded_at = db.Column(db.DateTime(timezone=True))
     __table_args__ = (db.UniqueConstraint("survey_id", "email", name="uq_survey_invite_email"),)
 
 def log(event, detail="", actor=None):
@@ -438,7 +472,7 @@ def dashboard_question_details(survey_id, accessible, sector, date_from, date_to
             item["distribution"] = [{"label": option, "count": count} for option, count in counts.items()]
         elif question.answer_type == "open":
             if role == "master" or question.sector == "Geral":
-                item["open_answers"] = [{"text": answer.answer_text, "submitted_at": submitted_at,
+                item["open_answers"] = [{"text": answer.answer_text, "themes": classify_comment(answer.answer_text), "submitted_at": submitted_at,
                     "device_submitted_at": device_at, "device_timezone": device_zone}
                     for answer, submitted_at, device_at, device_zone in rows if answer.answer_text]
             else:
@@ -446,18 +480,171 @@ def dashboard_question_details(survey_id, accessible, sector, date_from, date_to
         details.append(item)
     return details
 
+def evaluate_survey_alerts(survey_id):
+    survey = db.session.get(Survey, survey_id)
+    if not survey:
+        return
+    current = now()
+    recent_start = current - timedelta(days=30)
+    prior_start = current - timedelta(days=60)
+    period_key = current.astimezone(RECIFE_TZ).strftime("%Y-%m")
+    questions = Question.query.filter_by(survey_id=survey_id, active=True).filter(Question.answer_type.in_(('rating', 'nps'))).all()
+    for question in questions:
+        q = (db.session.query(Answer.rating, Response.submitted_at)
+            .join(Response, Response.id == Answer.response_id)
+            .filter(Answer.question_id == question.id, Response.survey_id == survey_id))
+        recent = [int(row.rating) for row in q.filter(Response.submitted_at >= recent_start).all()]
+        alert_type, summary = None, ""
+        if question.answer_type == "rating":
+            low = sum(1 for value in recent if value in (1, 2))
+            if low >= 3:
+                alert_type = "low_scores"
+                summary = "%s avaliações baixas (nota 1 ou 2) nos últimos 30 dias em %s." % (low, question.sector)
+        else:
+            prior = [int(row.rating) for row in q.filter(Response.submitted_at >= prior_start, Response.submitted_at < recent_start).all()]
+            if len(recent) >= 3 and len(prior) >= 3:
+                current_nps = round((sum(value >= 9 for value in recent) - sum(value <= 6 for value in recent)) / len(recent) * 100)
+                prior_nps = round((sum(value >= 9 for value in prior) - sum(value <= 6 for value in prior)) / len(prior) * 100)
+                if prior_nps - current_nps >= 10:
+                    alert_type = "nps_decline"
+                    summary = "NPS caiu %s pontos nos últimos 30 dias em %s (%s → %s)." % (prior_nps - current_nps, question.sector, prior_nps, current_nps)
+        if alert_type:
+            key = "%s:%s:%s:%s" % (survey_id, question.id, alert_type, period_key)
+            if not SurveyAlert.query.filter_by(alert_key=key).first():
+                db.session.add(SurveyAlert(alert_key=key, survey_id=survey_id, question_id=question.id,
+                    sector=question.sector, alert_type=alert_type, period_key=period_key, summary=summary))
+
+def comparison_metric_map(survey_id, accessible, sector, start_at=None, end_at=None):
+    if not survey_id or not accessible:
+        return {}
+    query = Question.query.filter_by(survey_id=survey_id, active=True).filter(Question.sector.in_(accessible)).filter(Question.answer_type.in_(('rating', 'nps')))
+    if sector in accessible:
+        query = query.filter(Question.sector == sector)
+    result = {}
+    for question in query.all():
+        answers_query = (db.session.query(Answer.rating).join(Response, Response.id == Answer.response_id)
+            .filter(Answer.question_id == question.id, Response.survey_id == survey_id))
+        if start_at:
+            answers_query = answers_query.filter(Response.submitted_at >= start_at)
+        if end_at:
+            answers_query = answers_query.filter(Response.submitted_at < end_at)
+        values = [int(row[0]) for row in answers_query.all() if row[0] is not None]
+        if question.answer_type == "rating":
+            values = [value for value in values if 1 <= value <= 5]
+            metric = round(sum(values) / len(values), 2) if len(values) >= 3 else None
+        else:
+            values = [value for value in values if 0 <= value <= 10]
+            metric = round((sum(value >= 9 for value in values) - sum(value <= 6 for value in values)) / len(values) * 100) if len(values) >= 3 else None
+        key = (question.sector, clean_name(question.text), question.answer_type)
+        result[key] = {"question": question, "metric": metric, "count": len(values)}
+    return result
+
+def dashboard_comparisons(survey_id, compare_survey_id, accessible, sector):
+    if not survey_id or not accessible:
+        return {"period": [], "survey": [], "period_label": ""}
+    local_now = now().astimezone(RECIFE_TZ)
+    current_start_local = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if local_now.month == 1:
+        prior_year, prior_month = local_now.year - 1, 12
+    else:
+        prior_year, prior_month = local_now.year, local_now.month - 1
+    prior_day = min(local_now.day, calendar.monthrange(prior_year, prior_month)[1])
+    prior_start_local = current_start_local.replace(year=prior_year, month=prior_month)
+    prior_end_local = prior_start_local.replace(day=prior_day, hour=local_now.hour, minute=local_now.minute, second=local_now.second, microsecond=local_now.microsecond)
+    current = comparison_metric_map(survey_id, accessible, sector, current_start_local.astimezone(timezone.utc), now())
+    prior = comparison_metric_map(survey_id, accessible, sector, prior_start_local.astimezone(timezone.utc), prior_end_local.astimezone(timezone.utc))
+    period_rows = []
+    for key, value in current.items():
+        other = prior.get(key)
+        if other and value["metric"] is not None and other["metric"] is not None:
+            diff = round(value["metric"] - other["metric"], 2)
+            period_rows.append({"question": value["question"], "current": value["metric"], "previous": other["metric"], "difference": diff,
+                "direction": "melhorou" if diff > 0 else "piorou" if diff < 0 else "estável", "kind": value["question"].answer_type})
+    survey_rows = []
+    if compare_survey_id and compare_survey_id != survey_id:
+        left = comparison_metric_map(survey_id, accessible, sector)
+        right = comparison_metric_map(compare_survey_id, accessible, sector)
+        for key, value in left.items():
+            other = right.get(key)
+            if other and value["metric"] is not None and other["metric"] is not None:
+                diff = round(value["metric"] - other["metric"], 2)
+                survey_rows.append({"question": value["question"], "current": value["metric"], "previous": other["metric"], "difference": diff,
+                    "direction": "melhorou" if diff > 0 else "piorou" if diff < 0 else "estável", "kind": value["question"].answer_type})
+    label = "%s/%s até %s versus %s/%s até %s" % (current_start_local.month, current_start_local.year, local_now.day,
+        prior_start_local.month, prior_start_local.year, prior_end_local.day)
+    return {"period": period_rows, "survey": survey_rows, "period_label": label}
+
+def xlsx_column(index):
+    result = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+def make_xlsx(sheets):
+    def xml_text(value):
+        value = "" if value is None else str(value)
+        value = "".join(ch for ch in value if ch in "\t\n\r" or ord(ch) >= 32)
+        return (value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&apos;"))
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as book:
+        book.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + "".join('<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' % i for i in range(1, len(sheets) + 1)) + '</Types>')
+        book.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        book.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + "".join('<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (xml_text(name[:31]), i, i) for i, (name, _) in enumerate(sheets, 1)) + '</sheets></workbook>')
+        book.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + "".join('<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>' % (i, i) for i in range(1, len(sheets) + 1)) + '</Relationships>')
+        for sheet_index, (_, rows) in enumerate(sheets, 1):
+            row_xml = []
+            for row_number, row in enumerate(rows, 1):
+                cells = []
+                for col_number, value in enumerate(row, 1):
+                    reference = "%s%d" % (xlsx_column(col_number), row_number)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        cells.append('<c r="%s"><v>%s</v></c>' % (reference, value))
+                    else:
+                        cells.append('<c r="%s" t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>' % (reference, xml_text(value)))
+                row_xml.append('<row r="%d">%s</row>' % (row_number, "".join(cells)))
+            book.writestr("xl/worksheets/sheet%d.xml" % sheet_index, '<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' + "".join(row_xml) + '</sheetData></worksheet>')
+    output.seek(0)
+    return output
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
     accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
     stats, selected_survey, selected_sector, date_from, date_to, trends = dashboard_data(accessible)
     question_details = dashboard_question_details(selected_survey, accessible, selected_sector, date_from, date_to, current_user.role)
+    surveys = Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all() if accessible else []
+    survey_ids = {survey.id for survey in surveys}
+    if selected_survey not in survey_ids:
+        selected_survey = None
+        question_details = []
+    compare_survey = request.args.get("compare_survey", type=int)
+    if compare_survey not in survey_ids or compare_survey == selected_survey:
+        compare_survey = None
+    for survey in surveys:
+        evaluate_survey_alerts(survey.id)
+    alerts = (SurveyAlert.query.filter(SurveyAlert.action_plan_id.is_(None), SurveyAlert.sector.in_(accessible))
+        .order_by(SurveyAlert.created_at.desc()).limit(50).all()) if accessible else []
+    participation = {}
+    for survey in surveys:
+        tracked = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.reminder_sent_at.isnot(None)).count()
+        completed = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.responded_at.isnot(None)).count()
+        participation[survey.id] = {"invited": tracked, "completed": completed,
+            "rate": round(completed / tracked * 100, 1) if tracked else 0}
+    comparisons = dashboard_comparisons(selected_survey, compare_survey, accessible, selected_sector)
+    comment_themes = Counter(theme for detail in question_details for answer in detail["open_answers"] for theme in answer["themes"])
     log("dashboard_view", ",".join(accessible))
     db.session.commit()
     return render_template("dashboard.html", stats=stats,
-        surveys=Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all() if accessible else [],
+        surveys=surveys,
         sectors=accessible, selected_survey=selected_survey, selected_sector=selected_sector,
-        date_from=date_from, date_to=date_to, trends=trends, question_details=question_details)
+        date_from=date_from, date_to=date_to, trends=trends, question_details=question_details,
+        compare_survey=compare_survey, comparisons=comparisons, alerts=alerts,
+        participation=participation, comment_themes=comment_themes,
+        survey_titles={item.id: item.title for item in surveys})
 
 @app.get("/dashboard/print")
 @login_required
@@ -468,6 +655,69 @@ def print_dashboard():
     log("dashboard_print", layout)
     db.session.commit()
     return render_template("dashboard_print.html", stats=stats, layout=layout, generated_at=now())
+
+@app.get("/dashboard/export.xlsx")
+@login_required
+def export_dashboard_xlsx():
+    accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
+    surveys = Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all() if accessible else []
+    selected = request.args.get("survey", type=int)
+    if selected:
+        if selected not in {item.id for item in surveys}:
+            abort(403)
+        surveys = [item for item in surveys if item.id == selected]
+    sector = request.args.get("sector", "")
+    if sector not in accessible:
+        sector = ""
+    date_from, date_to = request.args.get("from", ""), request.args.get("to", "")
+    try:
+        if date_from:
+            datetime.strptime(date_from, "%Y-%m-%d")
+        if date_to:
+            datetime.strptime(date_to, "%Y-%m-%d")
+    except ValueError:
+        abort(400)
+    indicator_rows = [["Pesquisa", "Setor", "Pergunta", "Tipo", "Indicador", "Valor"]]
+    comment_rows = [["Pesquisa", "Setor", "Pergunta", "Comentário", "Data/hora do servidor UTC", "Data/hora do dispositivo", "Fuso do dispositivo"]]
+    participation_rows = [["Pesquisa", "Convites rastreáveis enviados", "Respostas recebidas", "Taxa de conclusão"]]
+    for survey in surveys:
+        details = dashboard_question_details(survey.id, accessible, sector, date_from, date_to, current_user.role)
+        for detail in details:
+            question = detail["question"]
+            label_type = "NPS" if question.answer_type == "nps" else "Avaliação 1–5" if question.answer_type == "rating" else "Aberta" if question.answer_type == "open" else "Múltipla escolha"
+            if question.answer_type in ("rating", "nps"):
+                if detail["distribution_suppressed"]:
+                    indicator_rows.append([survey.title, question.sector, question.text, label_type, "Distribuição", "Oculta: menos de 3 respostas"])
+                else:
+                    metric_name = "NPS" if question.answer_type == "nps" else "Média / 5"
+                    metric_value = detail["nps"] if question.answer_type == "nps" else detail["average"]
+                    indicator_rows.append([survey.title, question.sector, question.text, label_type, metric_name, metric_value])
+                    for item in detail["distribution"]:
+                        indicator_rows.append([survey.title, question.sector, question.text, label_type, "Resposta " + item["label"], item["count"]])
+                    if detail.get("not_applicable"):
+                        indicator_rows.append([survey.title, question.sector, question.text, label_type, "Não se aplica / Não sei avaliar", detail["not_applicable"]])
+            elif question.answer_type in ("single", "multiple"):
+                if detail["distribution_suppressed"]:
+                    indicator_rows.append([survey.title, question.sector, question.text, label_type, "Distribuição", "Oculta: menos de 3 respostas"])
+                else:
+                    for item in detail["distribution"]:
+                        indicator_rows.append([survey.title, question.sector, question.text, label_type, item["label"], item["count"]])
+            elif question.answer_type == "open" and not detail["hidden_text"]:
+                for answer in detail["open_answers"]:
+                    device_time = answer["device_submitted_at"]
+                    comment_rows.append([survey.title, question.sector, question.text, answer["text"],
+                        answer["submitted_at"].strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        device_time.strftime("%Y-%m-%d %H:%M:%S UTC") if device_time else "Não informado", answer["device_timezone"]])
+        tracked = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.reminder_sent_at.isnot(None)).count()
+        completed = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.responded_at.isnot(None)).count()
+        participation_rows.append([survey.title, tracked, completed, "%s%%" % round(completed / tracked * 100, 1) if tracked else "—"])
+    log("dashboard_export_xlsx", "surveys:%s sector:%s" % (len(surveys), sector or "all"))
+    db.session.commit()
+    file = make_xlsx([("Indicadores", indicator_rows), ("Comentários", comment_rows), ("Participação", participation_rows)])
+    return send_file(file, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True, download_name="indicadores_pesquisa.xlsx")
 
 @app.route("/action-plans", methods=["GET", "POST"])
 @login_required
@@ -482,6 +732,9 @@ def action_plans():
         plan.survey_id = request.form.get("survey_id", type=int)
         if not db.session.get(Survey, plan.survey_id):
             abort(400)
+        selected_survey = db.session.get(Survey, plan.survey_id)
+        if not Question.query.filter(Question.survey_id == selected_survey.id, Question.sector == sector).first():
+            abort(403)
         plan.sector = sector
         plan.title = request.form.get("title", "").strip()[:200]
         plan.description = request.form.get("description", "").strip()[:2000]
@@ -498,14 +751,29 @@ def action_plans():
         else:
             if not plan_id:
                 db.session.add(plan)
+            alert_id = request.form.get("alert_id", type=int)
+            alert = db.session.get(SurveyAlert, alert_id) if alert_id else None
+            if alert_id and not alert:
+                abort(403)
+            if alert and (alert.action_plan_id is not None or alert.survey_id != plan.survey_id or alert.sector != sector or sector not in accessible):
+                abort(403)
+            if alert:
+                db.session.flush()
+                alert.action_plan_id = plan.id
             log("action_plan_save", ("update:" if plan_id else "create:") + str(plan.id or "new"))
             db.session.commit()
             flash("Plano de ação salvo.", "success")
         return redirect(url_for("action_plans"))
     plans = ActionPlan.query.filter(ActionPlan.sector.in_(accessible)).order_by(ActionPlan.due_date, ActionPlan.id.desc()).all() if accessible else []
-    surveys = Survey.query.order_by(Survey.title).all()
+    surveys = (Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all()
+               if accessible else [])
     survey_titles = {s.id: s.title for s in surveys}
-    return render_template("action_plans.html", plans=plans, surveys=surveys, sectors=accessible, survey_titles=survey_titles)
+    alert_id = request.args.get("alert_id", type=int)
+    alert = db.session.get(SurveyAlert, alert_id) if alert_id else None
+    if alert and (alert.sector not in accessible or alert.action_plan_id is not None):
+        alert = None
+    return render_template("action_plans.html", plans=plans, surveys=surveys, sectors=accessible,
+        survey_titles=survey_titles, alert=alert)
 
 @app.route("/admin/surveys", methods=["GET", "POST"])
 @login_required
@@ -555,6 +823,7 @@ def delete_survey(sid):
         Answer.query.filter(Answer.response_id.in_(response_ids)).delete(synchronize_session=False)
     Response.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     RespondentIdentity.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    SurveyAlert.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     ActionPlan.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     SurveyInvite.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     log("survey_delete", "survey:" + str(sid))
@@ -576,6 +845,8 @@ def clear_survey_responses(sid):
         Answer.query.filter(Answer.response_id.in_(response_ids)).delete(synchronize_session=False)
     Response.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     RespondentIdentity.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    SurveyInvite.query.filter_by(survey_id=sid).update({"responded_at": None}, synchronize_session=False)
+    SurveyAlert.query.filter_by(survey_id=sid).delete(synchronize_session=False)
     log("survey_responses_cleared", "survey:%s responses:%s answers:%s" % (sid, response_count, answer_count))
     db.session.commit()
     flash("Respostas e identificações desta pesquisa removidas. A pesquisa e as perguntas foram preservadas.", "success")
@@ -697,17 +968,26 @@ def edit_survey(sid):
             try:
                 starts_at = parse_local_datetime(request.form.get("starts_at"))
                 ends_at = parse_local_datetime(request.form.get("ends_at"))
+                target = request.form.get("target") if request.form.get("target") in ("lojista", "publico") else survey.target
+                identity_type = request.form.get("identity_type") if request.form.get("identity_type") in ("none", "cpf", "cnpj") else survey.identity_type
+                response_limit = request.form.get("response_limit", "none")
                 if starts_at and ends_at and starts_at >= ends_at:
                     raise ValueError("A data de encerramento precisa ser posterior à data de início.")
+                if response_limit not in ("none", "document", "merchant"):
+                    raise ValueError("Escolha um limite de respostas válido.")
+                if response_limit == "document" and identity_type not in ("cpf", "cnpj"):
+                    raise ValueError("Para limitar por documento, configure a pesquisa para solicitar CPF ou CNPJ.")
+                if response_limit == "merchant" and target != "lojista":
+                    raise ValueError("O limite por lojista só pode ser usado em pesquisas destinadas a lojistas.")
             except ValueError as exc:
                 flash(str(exc) or "Informe as datas no formato correto.", "error")
             else:
                 survey.title = request.form.get("title", survey.title)[:200]
                 survey.description = request.form.get("description", "")[:2000]
-                survey.target = request.form.get("target") if request.form.get("target") in ("lojista", "publico") else survey.target
+                survey.target = target
                 survey.active = request.form.get("save_draft") != "yes" and request.form.get("active") == "on"
-                if request.form.get("identity_type") in ("none", "cpf", "cnpj"):
-                    survey.identity_type = request.form.get("identity_type")
+                survey.identity_type = identity_type
+                survey.response_limit = response_limit
                 survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
                 survey.starts_at, survey.ends_at = starts_at, ends_at
                 log("survey_update", str(sid))
@@ -789,8 +1069,12 @@ def edit_survey(sid):
     invite_total = SurveyInvite.query.filter_by(survey_id=sid).count()
     invite_pending = SurveyInvite.query.filter_by(survey_id=sid, reminder_sent_at=None).count()
     response_count = Response.query.filter_by(survey_id=sid).count()
+    tracked_invites = SurveyInvite.query.filter_by(survey_id=sid).filter(SurveyInvite.response_token_hash != "", SurveyInvite.reminder_sent_at.isnot(None)).count()
+    tracked_responses = SurveyInvite.query.filter_by(survey_id=sid).filter(SurveyInvite.response_token_hash != "", SurveyInvite.responded_at.isnot(None)).count()
     return render_template("edit_survey.html", survey=survey, invite_total=invite_total,
         invite_pending=invite_pending, response_count=response_count,
+        tracked_invites=tracked_invites, tracked_responses=tracked_responses,
+        participation_rate=round(tracked_responses / tracked_invites * 100, 1) if tracked_invites else 0,
         starts_at_input=local_datetime_input(survey.starts_at), ends_at_input=local_datetime_input(survey.ends_at))
 
 @app.get("/admin/surveys/<int:sid>/qrcode.png")
@@ -868,11 +1152,13 @@ def remind_survey_invites(sid):
             if settings["username"]:
                 smtp.login(settings["username"], settings["password"])
             for invite in pending:
+                token = secrets.token_urlsafe(32)
+                invite.response_token_hash = hashlib.sha256(token.encode()).hexdigest()
                 msg = EmailMessage()
                 msg["Subject"] = "Lembrete: pesquisa de satisfação — " + survey.title
                 msg["From"] = settings["from_address"] or "pesquisa@example.invalid"
                 msg["To"] = invite.email
-                msg.set_content("A pesquisa de satisfação está aberta. Responda pelo link: " + url_for("public_survey", slug=survey.slug, _external=True) + "\\n\\nOs dados de identificação não são vinculados às respostas individuais.")
+                msg.set_content("A pesquisa de satisfação está aberta. Responda pelo link individual: " + url_for("public_survey", slug=survey.slug, invite=token, _external=True) + "\\n\\nOs dados de identificação não são vinculados às respostas individuais. O sistema registra apenas se este convite recebeu resposta, sem associar o e-mail às respostas.")
                 smtp.send_message(msg)
                 invite.reminder_sent_at = now()
                 sent += 1
@@ -1090,6 +1376,13 @@ def public_survey(slug):
     questions = [q for q in s.questions if q.active]
     if not questions:
         abort(404)
+    session.pop("survey_invite_id", None)
+    invite_token = request.args.get("invite", "").strip()
+    if invite_token:
+        invited = SurveyInvite.query.filter_by(survey_id=s.id,
+            response_token_hash=hashlib.sha256(invite_token.encode()).hexdigest()).first()
+        if invited:
+            session["survey_invite_id"] = invited.id
     if request.method == "POST":
         if request.form.get("stage") == "identity":
             info = {k: request.form.get(k, "").strip()[:255] for k in ("store_name", "email", "owner_name", "cnpj")}
@@ -1121,6 +1414,18 @@ def public_survey(slug):
                     RespondentIdentity.token_hash.isnot(None),
                     RespondentIdentity.submitted_at < now() - timedelta(hours=24)
                 ).delete(synchronize_session=False)
+                duplicate = False
+                if s.response_limit == "document" and info["document_type"] in ("cpf", "cnpj"):
+                    duplicate = RespondentIdentity.query.filter_by(survey_id=s.id, document_type=info["document_type"], document_number=info["document_number"]).first() is not None
+                    if not duplicate and info["document_type"] == "cnpj":
+                        duplicate = Response.query.filter(Response.survey_id == s.id, Response.cnpj == info["document_number"]).first() is not None
+                elif s.response_limit == "merchant" and matched:
+                    duplicate = RespondentIdentity.query.filter_by(survey_id=s.id, eligibility_cnpj=matched.cnpj).first() is not None
+                    if not duplicate:
+                        duplicate = Response.query.filter_by(survey_id=s.id, merchant_id=matched.id).first() is not None
+                if duplicate:
+                    flash("Esta pesquisa já recebeu uma resposta usando este documento ou cadastro.", "error")
+                    return render_template("identity.html", survey=s)
                 pending = RespondentIdentity(
                     survey_id=s.id,
                     document_type=info.get("document_type", "none"),
@@ -1134,7 +1439,11 @@ def public_survey(slug):
                 db.session.add(pending)
                 db.session.commit()
                 has_branches = any(q.branch_question_id for q in questions)
-                session["survey_state"] = {"survey": s.id, "token": token, "merchant_id": matched.id if matched else None,
+                invite_id = session.get("survey_invite_id")
+                invite = db.session.get(SurveyInvite, invite_id) if invite_id else None
+                if not invite or invite.survey_id != s.id:
+                    invite_id = None
+                session["survey_state"] = {"survey": s.id, "token": token, "merchant_id": matched.id if matched else None, "invite_id": invite_id,
                                            "question_order": [q.id for q in questions]}
                 if s.shuffle_questions and not has_branches:
                     random.shuffle(session["survey_state"]["question_order"])
@@ -1212,6 +1521,9 @@ def answer_survey(slug):
         device_timezone = request.form.get("device_timezone", "").strip()[:80]
         resp = Response(survey_id=s.id, device_submitted_at=device_time, device_timezone=device_timezone)
         db.session.add(resp)
+        invite = db.session.get(SurveyInvite, state.get("invite_id")) if state.get("invite_id") else None
+        if invite and invite.survey_id == s.id:
+            invite.responded_at = now()
         identity.token_hash = None
         identity.submitted_at = now()
         db.session.flush()
@@ -1220,9 +1532,11 @@ def answer_survey(slug):
                 continue
             item = answers[q.id]
             db.session.add(Answer(response_id=resp.id, question_id=q.id, rating=item["rating"], answer_text=item["text"]))
+        evaluate_survey_alerts(s.id)
         log("survey_submitted", "survey:" + str(s.id))
         db.session.commit()
         session.pop("survey_state", None)
+        session.pop("survey_invite_id", None)
         sent = send_receipt(resp, s, questions, answers, identity.email or "")
         if sent:
             resp.email_sent = True
@@ -1338,6 +1652,11 @@ def ensure_schema():
                 "shuffle_questions": "BOOLEAN NOT NULL DEFAULT FALSE",
                 "starts_at": "TIMESTAMP WITH TIME ZONE",
                 "ends_at": "TIMESTAMP WITH TIME ZONE",
+                "response_limit": "VARCHAR(20) NOT NULL DEFAULT 'none'",
+            },
+            "survey_invite": {
+                "response_token_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+                "responded_at": "TIMESTAMP WITH TIME ZONE",
             },
             "response": {
                 "device_submitted_at": "TIMESTAMP WITH TIME ZONE",

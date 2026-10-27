@@ -1,13 +1,17 @@
 import os
-from datetime import datetime, timezone
+import io
+import hashlib
+import zipfile
+from datetime import datetime, timezone, timedelta
 os.environ["SECRET_KEY"] = "test-secret-is-only-for-tests-not-production"
 os.environ["DATABASE_URL"] = "sqlite://"
 import pytest
-from app import app, db, User, Merchant, Survey, Question, Response, Answer, ActionPlan, RespondentIdentity, valid_cnpj, generate_password_hash
+from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, Question, Response, Answer, ActionPlan, RespondentIdentity, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment
 
 @pytest.fixture()
 def client():
-    app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+    app.config.update(TESTING=True, WTF_CSRF_ENABLED=False, RATELIMIT_ENABLED=False)
+    limiter.enabled = False
     with app.app_context():
         db.create_all()
         yield app.test_client()
@@ -214,3 +218,110 @@ def test_dashboard_drilldown_shows_question_level_distributions(client):
     assert b"Perguntas e respostas da pesquisa" in page.data
     assert b"Nota geral" in page.data and b"Coment\xc3\xa1rio" in page.data
     assert b"Bom atendimento" in page.data and b"Sim" in page.data
+
+def test_dashboard_alerts_offer_direct_action_plan(client):
+    with app.app_context():
+        db.session.add(User(username="park", password_hash=generate_password_hash("long-test-pass"), role="estacionamento"))
+        survey = Survey(title="Alerta", slug="alerta", active=True, target="publico")
+        db.session.add(survey); db.session.flush()
+        question = Question(survey_id=survey.id, sector="Estacionamento", text="Facilidade para estacionar?", position=1, answer_type="rating")
+        db.session.add(question); db.session.flush()
+        for _ in range(3):
+            response = Response(survey_id=survey.id, submitted_at=now())
+            db.session.add(response); db.session.flush()
+            db.session.add(Answer(response_id=response.id, question_id=question.id, rating=2))
+        db.session.commit()
+    signin(client, "park", "long-test-pass")
+    page = client.get("/dashboard")
+    assert page.status_code == 200 and b"Avalia\xc3\xa7\xc3\xb5es baixas" in page.data
+    with app.app_context():
+        alert = SurveyAlert.query.one()
+        alert_id = alert.id
+    saved = client.post("/action-plans", data={"alert_id": str(alert_id), "survey_id": "1", "sector": "Estacionamento", "title": "Revisar estacionamento", "description": "Verificar notas baixas", "priority": "alta", "status": "aberto"}, follow_redirects=True)
+    assert saved.status_code == 200
+    with app.app_context():
+        alert = db.session.get(SurveyAlert, alert_id)
+        assert alert.action_plan_id is not None
+        assert ActionPlan.query.count() == 1
+
+def test_dashboard_compares_months_and_matching_questions_across_surveys(client):
+    with app.app_context():
+        db.session.add(User(username="aud", password_hash=generate_password_hash("long-test-pass"), role="auditoria"))
+        current = Survey(title="Atual", slug="atual", active=True, target="publico")
+        comparison = Survey(title="Comparação", slug="comparacao", active=True, target="publico")
+        db.session.add_all([current, comparison]); db.session.flush()
+        q1 = Question(survey_id=current.id, sector="Geral", text="Atendimento", position=1, answer_type="rating")
+        q2 = Question(survey_id=comparison.id, sector="Geral", text="Atendimento", position=1, answer_type="rating")
+        db.session.add_all([q1, q2]); db.session.flush()
+        for question, rating, age in [(q1, 4, 4), (q1, 2, 40), (q2, 5, 4)]:
+            for _ in range(3):
+                response = Response(survey_id=question.survey_id, submitted_at=now() - timedelta(days=age))
+                db.session.add(response); db.session.flush()
+                db.session.add(Answer(response_id=response.id, question_id=question.id, rating=rating))
+        db.session.commit()
+    signin(client, "aud", "long-test-pass")
+    page = client.get("/dashboard?survey=1&compare_survey=2")
+    assert page.status_code == 200
+    assert b"M\xc3\xaas atual" in page.data and b"Pesquisa selecionada" in page.data
+    assert b"melhorou" in page.data
+
+def test_xlsx_export_respects_login_and_contains_filtered_question_sheets(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey = Survey(title="Exportar", slug="exportar", active=True, target="publico")
+        db.session.add(survey); db.session.flush()
+        question = Question(survey_id=survey.id, sector="Geral", text="Qual sua opinião?", position=1, answer_type="open")
+        db.session.add(question); db.session.flush()
+        for _ in range(3):
+            response = Response(survey_id=survey.id)
+            db.session.add(response); db.session.flush()
+            db.session.add(Answer(response_id=response.id, question_id=question.id, rating=0, answer_text="Ótimo atendimento"))
+        db.session.commit()
+    assert client.get("/dashboard/export.xlsx?survey=1").status_code == 302
+    signin(client, "master", "long-test-pass")
+    result = client.get("/dashboard/export.xlsx?survey=1")
+    assert result.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(result.data)) as book:
+        assert "xl/worksheets/sheet1.xml" in book.namelist()
+        assert "xl/worksheets/sheet2.xml" in book.namelist()
+        comments_sheet = book.read("xl/worksheets/sheet2.xml").decode()
+        assert "Qual sua opinião?" in comments_sheet
+        assert "Ótimo atendimento" in comments_sheet
+
+def test_survey_document_limit_blocks_duplicate_and_keeps_identity_separate(client):
+    cpf = "52998224725"
+    assert valid_cpf(cpf)
+    with app.app_context():
+        survey = Survey(title="Uma resposta", slug="uma-resposta", active=True, target="publico", identity_type="cpf", response_limit="document")
+        db.session.add(survey); db.session.flush()
+        question = Question(survey_id=survey.id, sector="Geral", text="Nota?", position=1)
+        db.session.add(question)
+        db.session.add(RespondentIdentity(survey_id=survey.id, document_type="cpf", document_number=cpf, token_hash=None))
+        db.session.commit()
+    page = client.post("/p/uma-resposta", data={"stage": "identity", "document_number": cpf}, follow_redirects=True)
+    assert page.status_code == 200 and b"j\xc3\xa1 recebeu uma resposta" in page.data
+    with app.app_context():
+        assert RespondentIdentity.query.count() == 1
+        assert Response.query.count() == 0
+
+def test_tracked_invitation_updates_aggregate_participation_without_answer_link(client):
+    token = "convite-individual"
+    with app.app_context():
+        survey = Survey(title="Rastreada", slug="rastreada", active=True, target="publico")
+        db.session.add(survey); db.session.flush()
+        db.session.add(Question(survey_id=survey.id, sector="Geral", text="Nota?", position=1))
+        invite = SurveyInvite(survey_id=survey.id, email="invite@example.com", reminder_sent_at=now(), response_token_hash=hashlib.sha256(token.encode()).hexdigest())
+        db.session.add(invite); db.session.commit()
+    client.get("/p/rastreada?invite=" + token)
+    started = client.post("/p/rastreada?invite=" + token, data={"stage": "identity"})
+    assert started.status_code == 302
+    submitted = client.post("/p/rastreada/responder", data={"q_1": "5", "confirm": "yes"})
+    assert submitted.status_code == 200
+    with app.app_context():
+        invite = SurveyInvite.query.one()
+        assert invite.responded_at is not None
+        assert Response.query.count() == 1 and Answer.query.count() == 1
+        assert not hasattr(invite, "response_id")
+
+def test_comment_theme_classifier_handles_multiple_topics():
+    assert set(classify_comment("A vaga estava suja e a cancela demorou")) == {"Estacionamento", "Limpeza"}
