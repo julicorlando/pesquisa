@@ -372,3 +372,9 @@ a { text-underline-offset: .18em; }
   background: transparent;
   box-shadow: none;
 }
+
+.question-answer-card { padding: 0; overflow: hidden; }
+.question-answer-card > summary { cursor: pointer; list-style-position: inside; padding: 24px; }
+.question-answer-card > summary h3 { margin: 12px 0; }
+.question-answer-card > summary:focus-visible { outline: 3px solid var(--teal, #008b8b); outline-offset: -4px; border-radius: 12px; }
+.question-answer-content { padding: 0 24px 24px; }
