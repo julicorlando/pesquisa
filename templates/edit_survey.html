@@ -46,6 +46,7 @@
     <label>Setor<select name="sector">{% for item in sectors %}<option>{{ item }}</option>{% endfor %}</select></label>
     <label>Enunciado<textarea name="text" required maxlength="1000"></textarea></label>
     <label class="check"><input type="checkbox" name="optional"> Pergunta opcional (pode avançar sem responder)</label>
+    <label class="check"><input type="checkbox" name="allow_na" checked> Oferecer “Não se aplica / Não sei avaliar” na avaliação de 1 a 5</label>
     <label>Tipo de resposta<select name="answer_type"><option value="rating">Avaliação de 1 a 5</option><option value="nps">NPS de 0 a 10</option><option value="open">Resposta aberta (até 5.000 caracteres)</option><option value="single">Múltipla escolha (uma opção)</option><option value="multiple">Múltipla escolha (uma ou mais opções)</option></select></label>
     <label>Ramificação condicional (opcional)<select name="branch_question_id"><option value="">Sempre exibir</option>{% for parent in survey.questions if parent.active and parent.answer_type in ('rating','nps','single') %}<option value="{{ parent.id }}">Após: {{ parent.text }}</option>{% endfor %}</select></label>
     <label>Exibir quando a resposta anterior for exatamente<input name="branch_value" maxlength="255" placeholder="Ex.: 1, 10 ou Sim"></label>
@@ -77,6 +78,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="edit_question"><input type="hidden" name="question_id" value="{{ q.id }}">
       <label>Enunciado<textarea name="text" required maxlength="1000">{{ q.text }}</textarea></label>
       <label class="check"><input type="checkbox" name="optional" {% if q.optional %}checked{% endif %}> Pergunta opcional (pode avançar sem responder)</label>
+      <label class="check"><input type="checkbox" name="allow_na" {% if q.allow_na %}checked{% endif %}> Oferecer “Não se aplica / Não sei avaliar” na avaliação de 1 a 5</label>
       <label>Tipo de resposta<select name="answer_type"><option value="rating" {% if q.answer_type=='rating' %}selected{% endif %}>Avaliação de 1 a 5</option><option value="nps" {% if q.answer_type=='nps' %}selected{% endif %}>NPS de 0 a 10</option><option value="open" {% if q.answer_type=='open' %}selected{% endif %}>Resposta aberta (até 5.000 caracteres)</option><option value="single" {% if q.answer_type=='single' %}selected{% endif %}>Múltipla escolha (uma opção)</option><option value="multiple" {% if q.answer_type=='multiple' %}selected{% endif %}>Múltipla escolha (uma ou mais opções)</option></select></label>
       <label>Opções (uma por linha; 2 a 20)<textarea name="choices" rows="5">{{ q.choice_options|join('\n') }}</textarea></label>
       <label>Aviso para quem responder<textarea name="notice" maxlength="500">{{ q.notice or '' }}</textarea></label>
