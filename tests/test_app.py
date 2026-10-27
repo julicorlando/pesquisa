@@ -288,6 +288,24 @@ def test_xlsx_export_respects_login_and_contains_filtered_question_sheets(client
         assert "Qual sua opinião?" in comments_sheet
         assert "Ótimo atendimento" in comments_sheet
 
+def test_pdf_export_requires_login_and_returns_a_pdf(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey = Survey(title="Relatório", slug="relatorio", active=True, target="publico")
+        db.session.add(survey); db.session.flush()
+        question = Question(survey_id=survey.id, sector="Geral", text="Como foi?", position=1, answer_type="rating")
+        db.session.add(question); db.session.flush()
+        for rating in (3, 4, 5):
+            response = Response(survey_id=survey.id)
+            db.session.add(response); db.session.flush()
+            db.session.add(Answer(response_id=response.id, question_id=question.id, rating=rating))
+        db.session.commit()
+    assert client.get("/dashboard/export.pdf?survey=1").status_code == 302
+    signin(client, "master", "long-test-pass")
+    result = client.get("/dashboard/export.pdf?survey=1&sector=Geral")
+    assert result.status_code == 200 and result.mimetype == "application/pdf"
+    assert result.data.startswith(b"%PDF-")
+
 def test_survey_document_limit_blocks_duplicate_and_keeps_identity_separate(client):
     cpf = "52998224725"
     assert valid_cpf(cpf)

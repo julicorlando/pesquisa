@@ -719,6 +719,108 @@ def export_dashboard_xlsx():
     return send_file(file, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True, download_name="indicadores_pesquisa.xlsx")
 
+@app.get("/dashboard/export.pdf")
+@login_required
+def export_dashboard_pdf():
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from xml.sax.saxutils import escape
+
+    accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
+    surveys = Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all() if accessible else []
+    selected = request.args.get("survey", type=int)
+    if selected:
+        if selected not in {item.id for item in surveys}:
+            abort(403)
+        surveys = [item for item in surveys if item.id == selected]
+    sector = request.args.get("sector", "")
+    if sector not in accessible:
+        sector = ""
+    date_from, date_to = request.args.get("from", ""), request.args.get("to", "")
+    try:
+        if date_from:
+            datetime.strptime(date_from, "%Y-%m-%d")
+        if date_to:
+            datetime.strptime(date_to, "%Y-%m-%d")
+    except ValueError:
+        abort(400)
+
+    output = io.BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=landscape(A4), rightMargin=12*mm, leftMargin=12*mm, topMargin=13*mm, bottomMargin=13*mm)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="SmallCell", parent=styles["BodyText"], fontSize=7.5, leading=9, alignment=TA_LEFT))
+    styles.add(ParagraphStyle(name="Subtle", parent=styles["BodyText"], textColor=colors.HexColor("#566273"), fontSize=8))
+    story = [Paragraph("Relatório de pesquisas", styles["Title"]),
+        Paragraph("Filtros: %s · Setor: %s · Período: %s a %s" % (
+            escape(", ".join(item.title for item in surveys) or "Todas as pesquisas acessíveis"),
+            escape(sector or "Todos os setores permitidos"), escape(date_from or "início"), escape(date_to or "hoje")), styles["Subtle"]), Spacer(1, 5*mm)]
+    for survey_index, survey in enumerate(surveys):
+        if survey_index:
+            story.append(PageBreak())
+        story.append(Paragraph(escape(survey.title), styles["Heading1"]))
+        details = dashboard_question_details(survey.id, accessible, sector, date_from, date_to, current_user.role)
+        invite_count = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.reminder_sent_at.isnot(None)).count()
+        completed_count = SurveyInvite.query.filter_by(survey_id=survey.id).filter(
+            SurveyInvite.response_token_hash != "", SurveyInvite.responded_at.isnot(None)).count()
+        story.append(Paragraph("Participação: %d convites rastreáveis · %d respostas · %s%% de conclusão" % (
+            invite_count, completed_count, round(completed_count / invite_count * 100, 1) if invite_count else 0), styles["BodyText"]))
+        for detail in details:
+            question = detail["question"]
+            story.extend([Spacer(1, 3*mm), Paragraph("<b>%s</b> · %s" % (escape(question.sector), escape(question.text)), styles["Heading3"])])
+            if question.answer_type in ("rating", "nps", "single", "multiple"):
+                if detail["distribution_suppressed"]:
+                    story.append(Paragraph("Indicadores ocultos: menos de 3 respostas.", styles["Subtle"]))
+                    continue
+                metric = ("NPS: %s" % detail["nps"] if question.answer_type == "nps" else
+                    "Média: %s / 5" % detail["average"] if question.answer_type == "rating" else "Respostas por opção")
+                story.append(Paragraph(escape(metric), styles["BodyText"]))
+                distribution = detail["distribution"]
+                chart = Drawing(650, 150)
+                bars = VerticalBarChart()
+                bars.x, bars.y, bars.width, bars.height = 42, 28, 585, 105
+                bars.data = [[item["count"] for item in distribution]]
+                bars.categoryAxis.categoryNames = [str(item["label"])[:18] for item in distribution]
+                bars.categoryAxis.labels.fontSize = 7
+                bars.valueAxis.valueMin = 0
+                bars.valueAxis.valueMax = max(1, max((item["count"] for item in distribution), default=1))
+                bars.valueAxis.valueStep = max(1, bars.valueAxis.valueMax // 5)
+                bars.bars[0].fillColor = colors.HexColor("#0b7d79")
+                chart.add(bars)
+                story.append(chart)
+                rows = [[Paragraph("Opção", styles["SmallCell"]), Paragraph("Respostas", styles["SmallCell"])]]
+                rows += [[Paragraph(escape(str(item["label"])), styles["SmallCell"]), str(item["count"])] for item in distribution]
+                table = Table(rows, colWidths=[160*mm, 28*mm], repeatRows=1)
+                table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#eaf3f2")),
+                    ("GRID", (0,0), (-1,-1), .25, colors.HexColor("#ccd7d7")), ("VALIGN", (0,0), (-1,-1), "TOP")]))
+                story.append(table)
+            elif question.answer_type == "open":
+                if detail["hidden_text"]:
+                    story.append(Paragraph("Comentários ocultos pelas regras de privacidade.", styles["Subtle"]))
+                elif detail["open_answers"]:
+                    rows = [["Tema(s)", "Comentário"]]
+                    rows += [[Paragraph(escape(", ".join(item["themes"])), styles["SmallCell"]),
+                        Paragraph(escape(item["text"]), styles["SmallCell"])] for item in detail["open_answers"]]
+                    table = Table(rows, colWidths=[45*mm, 220*mm], repeatRows=1)
+                    table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#eaf3f2")),
+                        ("GRID", (0,0), (-1,-1), .25, colors.HexColor("#ccd7d7")), ("VALIGN", (0,0), (-1,-1), "TOP")]))
+                    story.append(table)
+                else:
+                    story.append(Paragraph("Sem comentários no filtro selecionado.", styles["Subtle"]))
+    if not surveys:
+        story.append(Paragraph("Nenhuma pesquisa disponível para os filtros e permissões deste perfil.", styles["BodyText"]))
+    doc.build(story)
+    output.seek(0)
+    log("dashboard_export_pdf", "surveys:%s sector:%s" % (len(surveys), sector or "all"))
+    db.session.commit()
+    return send_file(output, mimetype="application/pdf", as_attachment=True, download_name="indicadores_pesquisa.pdf")
+
 @app.route("/action-plans", methods=["GET", "POST"])
 @login_required
 def action_plans():
