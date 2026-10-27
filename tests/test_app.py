@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 os.environ["SECRET_KEY"] = "test-secret-is-only-for-tests-not-production"
 os.environ["DATABASE_URL"] = "sqlite://"
 import pytest
@@ -121,12 +122,15 @@ def test_optional_question_can_be_left_blank(client):
     page=client.get("/p/optional/responder")
     assert b"data-optional=\"true\"" in page.data
     assert b"Opcional" in page.data
-    response=client.post("/p/optional/responder",data={"q_1":"4","confirm":"yes"})
+    response=client.post("/p/optional/responder",data={"q_1":"4","confirm":"yes","device_submitted_at":"2026-10-27T14:30:00Z","device_timezone":"America/Recife"})
     assert response.status_code == 200
     with app.app_context():
         assert Response.query.filter_by(survey_id=1).count() == 1
         assert Answer.query.count() == 1
         assert Answer.query.first().question_id == 1
+        saved_response = Response.query.first()
+        assert saved_response.device_submitted_at.isoformat().startswith("2026-10-27T14:30:00")
+        assert saved_response.device_timezone == "America/Recife"
 
 def test_action_plan_and_qr_code_routes(client):
     with app.app_context():
@@ -185,3 +189,27 @@ def test_master_can_clear_responses_without_deleting_survey_questions_or_action_
         assert Response.query.count() == 0
         assert Answer.query.count() == 0
         assert RespondentIdentity.query.count() == 0
+
+def test_dashboard_drilldown_shows_question_level_distributions(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey = Survey(title="Detalhada", slug="detalhada", active=True, target="publico")
+        db.session.add(survey); db.session.flush()
+        rating = Question(survey_id=survey.id, sector="Geral", text="Nota geral", position=1, answer_type="rating")
+        choice = Question(survey_id=survey.id, sector="Geral", text="Opção", position=2, answer_type="single", choices='["Sim", "Não"]')
+        opened = Question(survey_id=survey.id, sector="Geral", text="Comentário", position=3, answer_type="open")
+        db.session.add_all([rating, choice, opened]); db.session.flush()
+        response = Response(survey_id=survey.id, device_submitted_at=datetime(2026, 10, 27, 14, 30, tzinfo=timezone.utc), device_timezone="America/Recife")
+        db.session.add(response); db.session.flush()
+        db.session.add_all([
+            Answer(response_id=response.id, question_id=rating.id, rating=4),
+            Answer(response_id=response.id, question_id=choice.id, rating=0, answer_text='["Sim"]'),
+            Answer(response_id=response.id, question_id=opened.id, rating=0, answer_text="Bom atendimento"),
+        ])
+        db.session.commit()
+    signin(client, "master", "long-test-pass")
+    page = client.get("/dashboard?survey=1")
+    assert page.status_code == 200
+    assert b"Perguntas e respostas da pesquisa" in page.data
+    assert b"Nota geral" in page.data and b"Coment\xc3\xa1rio" in page.data
+    assert b"Bom atendimento" in page.data and b"Sim" in page.data

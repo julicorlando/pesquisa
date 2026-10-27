@@ -76,6 +76,17 @@ def local_datetime_input(value):
 
 app.jinja_env.filters["local_datetime_input"] = local_datetime_input
 
+def format_device_datetime(value, zone_name):
+    if not value:
+        return "Não informado pelo dispositivo"
+    try:
+        zone = ZoneInfo(zone_name) if zone_name else timezone.utc
+    except (ValueError, KeyError):
+        zone = timezone.utc
+    return as_utc(value).astimezone(zone).strftime("%d/%m/%Y %H:%M:%S")
+
+app.jinja_env.filters["device_datetime"] = format_device_datetime
+
 def clean_name(v):
     v = unicodedata.normalize("NFKD", (v or "").strip().casefold())
     return re.sub(r"\s+", " ", "".join(c for c in v if not unicodedata.combining(c)))
@@ -203,6 +214,8 @@ class Response(db.Model):
     email = db.Column(db.String(255))
     cnpj = db.Column(db.String(14))
     submitted_at = db.Column(db.DateTime(timezone=True), default=now)
+    device_submitted_at = db.Column(db.DateTime(timezone=True))
+    device_timezone = db.Column(db.String(80), default="")
     email_sent = db.Column(db.Boolean, default=False)
     answers = db.relationship("Answer", backref="response", cascade="all,delete-orphan")
 
@@ -379,17 +392,70 @@ def dashboard_data(accessible):
             "nps": round(((int(promoters or 0) - int(detractors or 0)) / count) * 100) if count >= 3 and kind == "nps" else None})
     return stats, survey_id, sector, date_from, date_to, trends
 
+def dashboard_question_details(survey_id, accessible, sector, date_from, date_to, role):
+    if not survey_id or not accessible:
+        return []
+    query = Question.query.filter_by(survey_id=survey_id).filter(Question.sector.in_(accessible))
+    if sector in accessible:
+        query = query.filter(Question.sector == sector)
+    questions = query.order_by(Question.position, Question.id).all()
+    details = []
+    for question in questions:
+        answers_query = (db.session.query(Answer, Response.submitted_at, Response.device_submitted_at, Response.device_timezone)
+            .join(Response, Response.id == Answer.response_id)
+            .filter(Response.survey_id == survey_id, Answer.question_id == question.id))
+        if date_from:
+            answers_query = answers_query.filter(Response.submitted_at >= datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc))
+        if date_to:
+            answers_query = answers_query.filter(Response.submitted_at < datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1))
+        rows = answers_query.order_by(Response.submitted_at.desc()).all()
+        item = {"question": question, "count": len(rows), "distribution": [], "open_answers": [], "hidden_text": False}
+        if question.answer_type in ("rating", "nps"):
+            labels = range(1, 6) if question.answer_type == "rating" else range(0, 11)
+            counts = {value: 0 for value in labels}
+            not_applicable = 0
+            for answer, *_ in rows:
+                if question.answer_type == "rating" and answer.rating == 0:
+                    not_applicable += 1
+                elif answer.rating in counts:
+                    counts[answer.rating] += 1
+            item["distribution"] = [{"label": str(value), "count": counts[value]} for value in counts]
+            item["not_applicable"] = not_applicable
+            item["average"] = round(sum(value * count for value, count in counts.items()) / sum(counts.values()), 2) if question.answer_type == "rating" and sum(counts.values()) else None
+            item["nps"] = round((sum(counts[value] for value in range(9, 11)) - sum(counts[value] for value in range(0, 7))) / sum(counts.values()) * 100) if question.answer_type == "nps" and sum(counts.values()) else None
+        elif question.answer_type in ("single", "multiple"):
+            counts = {option: 0 for option in question.choice_options}
+            for answer, *_ in rows:
+                try:
+                    selected = json.loads(answer.answer_text or "[]")
+                except (TypeError, ValueError):
+                    selected = []
+                for value in selected if isinstance(selected, list) else []:
+                    if value in counts:
+                        counts[value] += 1
+            item["distribution"] = [{"label": option, "count": count} for option, count in counts.items()]
+        elif question.answer_type == "open":
+            if role == "master" or question.sector == "Geral":
+                item["open_answers"] = [{"text": answer.answer_text, "submitted_at": submitted_at,
+                    "device_submitted_at": device_at, "device_timezone": device_zone}
+                    for answer, submitted_at, device_at, device_zone in rows if answer.answer_text]
+            else:
+                item["hidden_text"] = True
+        details.append(item)
+    return details
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
     accessible = SECTORS if current_user.role in ("master", "auditoria") else ROLE_SECTORS.get(current_user.role, [])
     stats, selected_survey, selected_sector, date_from, date_to, trends = dashboard_data(accessible)
+    question_details = dashboard_question_details(selected_survey, accessible, selected_sector, date_from, date_to, current_user.role)
     log("dashboard_view", ",".join(accessible))
     db.session.commit()
     return render_template("dashboard.html", stats=stats,
         surveys=Survey.query.filter(Survey.questions.any(Question.sector.in_(accessible))).order_by(Survey.title).all() if accessible else [],
         sectors=accessible, selected_survey=selected_survey, selected_sector=selected_sector,
-        date_from=date_from, date_to=date_to, trends=trends)
+        date_from=date_from, date_to=date_to, trends=trends, question_details=question_details)
 
 @app.get("/dashboard/print")
 @login_required
@@ -1135,7 +1201,14 @@ def answer_survey(slug):
             db.session.commit()
             session.pop("survey_state", None)
             return render_template("thanks.html", sent=False)
-        resp = Response(survey_id=s.id)
+        device_time = request.form.get("device_submitted_at", "").strip()
+        try:
+            device_time = datetime.fromisoformat(device_time.replace("Z", "+00:00"))
+            device_time = device_time.astimezone(timezone.utc) if device_time.tzinfo else None
+        except ValueError:
+            device_time = None
+        device_timezone = request.form.get("device_timezone", "").strip()[:80]
+        resp = Response(survey_id=s.id, device_submitted_at=device_time, device_timezone=device_timezone)
         db.session.add(resp)
         identity.token_hash = None
         identity.submitted_at = now()
@@ -1263,6 +1336,10 @@ def ensure_schema():
                 "shuffle_questions": "BOOLEAN NOT NULL DEFAULT FALSE",
                 "starts_at": "TIMESTAMP WITH TIME ZONE",
                 "ends_at": "TIMESTAMP WITH TIME ZONE",
+            },
+            "response": {
+                "device_submitted_at": "TIMESTAMP WITH TIME ZONE",
+                "device_timezone": "VARCHAR(80) NOT NULL DEFAULT ''",
             },
             "question": {
                 "answer_type": "VARCHAR(20) NOT NULL DEFAULT 'rating'",

@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% block content %}
 <div class="survey-shell" aria-labelledby="surveyTitle"><div class="eyebrow">PESQUISA DE SATISFAÇÃO</div><h1 id="surveyTitle">{{ survey.title }}</h1><p>Responda com sinceridade. Uma pergunta por vez. Você pode voltar e revisar tudo antes de enviar.</p>
 <div class="progress" role="progressbar" aria-label="Progresso da pesquisa"><div id="progressBar"></div></div><div class="stepcount" id="stepCount" aria-live="polite"></div>
-<form method="post" id="surveyForm"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="confirm" id="confirmFlag" value="no">
+<form method="post" id="surveyForm"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="confirm" id="confirmFlag" value="no"><input type="hidden" name="device_submitted_at" id="deviceSubmittedAt"><input type="hidden" name="device_timezone" id="deviceTimezone">
 {% for q in questions %}
 <section class="question-step card" data-step data-qid="{{ q.id }}" data-parent="{{ q.branch_question_id or '' }}" data-branch-value="{{ q.branch_value or '' }}" data-optional="{{ 'true' if q.optional else 'false' }}" hidden aria-labelledby="question-{{ q.id }}"><div class="eyebrow">{{ q.sector|upper }}</div><h2 id="question-{{ q.id }}">{{ q.text }}{% if q.optional %} <small class="optional-tag">Opcional</small>{% endif %}</h2>
 {% if q.notice %}<div class="notice" role="note"><strong>Aviso:</strong> {{ q.notice }}</div>{% endif %}
@@ -32,6 +32,6 @@ function renderReview(visible){const area=document.getElementById('review');area
 form.addEventListener('input',e=>{if(e.target.matches('[data-open-answer]'))updateCounters();if(e.target.matches('input[type=radio]'))refreshVisibility();});form.addEventListener('change',e=>{if(e.target.matches('input[type=radio]'))refreshVisibility();});updateCounters();
 next.addEventListener('click',()=>{const visible=visibleSteps(),section=visible[current];if(section&&!validCurrent(section)){section.querySelector('input:not([type=hidden]),textarea')?.focus();return;}show(current+1);});
 prev.addEventListener('click',()=>show(Math.max(0,current-1)));
-form.addEventListener('submit',e=>{if(current!==visibleSteps().length||!document.getElementById('confirmCheck').checked){e.preventDefault();return;}document.getElementById('confirmFlag').value='yes';submit.disabled=true;});
+form.addEventListener('submit',e=>{if(current!==visibleSteps().length||!document.getElementById('confirmCheck').checked){e.preventDefault();return;}document.getElementById('confirmFlag').value='yes';document.getElementById('deviceSubmittedAt').value=new Date().toISOString();document.getElementById('deviceTimezone').value=Intl.DateTimeFormat().resolvedOptions().timeZone||'';submit.disabled=true;});
 refreshVisibility();
 </script>{% endblock %}
