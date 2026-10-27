@@ -352,11 +352,13 @@ def edit_survey(sid):
             survey.title = request.form.get("title", survey.title)[:200]
             survey.description = request.form.get("description", "")[:2000]
             survey.target = request.form.get("target") if request.form.get("target") in ("lojista", "publico") else survey.target
-            survey.active = request.form.get("active") == "on"
+            survey.active = request.form.get("save_draft") != "yes" and request.form.get("active") == "on"
             if request.form.get("identity_type") in ("none", "cpf", "cnpj"):
                 survey.identity_type = request.form.get("identity_type")
             survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
             log("survey_update", str(sid))
+            if request.form.get("save_draft") == "yes":
+                flash("Rascunho salvo. Ele continuará fechado para respostas.", "success")
         elif kind == "question":
             sector = request.form.get("sector")
             text = request.form.get("text", "").strip()
@@ -368,6 +370,7 @@ def edit_survey(sid):
             elif sector in SECTORS and text:
                 db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False)))
                 log("question_create", str(sid))
+                flash("Pergunta adicionada e salva automaticamente.", "success")
         elif kind == "move_question":
             q = db.get_or_404(Question, int(request.form.get("question_id", 0)))
             if q.survey_id != sid:
@@ -524,6 +527,24 @@ def edit_user(uid):
     log("user_update", str(uid) + ":" + role)
     db.session.commit()
     flash("Cadastro do usuário atualizado.", "success")
+    return redirect(url_for("users"))
+
+@app.post("/admin/users/<int:uid>/delete")
+@roles("master")
+def delete_user(uid):
+    user = db.get_or_404(User, uid)
+    if user.id == current_user.id:
+        flash("Não é permitido excluir sua própria conta.", "error")
+        return redirect(url_for("users"))
+    if user.role == "master" and user.active and User.query.filter_by(role="master", active=True).count() <= 1:
+        flash("Não é permitido excluir o último Master ativo.", "error")
+        return redirect(url_for("users"))
+    username, role = user.username, user.role
+    FirstAccessToken.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+    db.session.delete(user)
+    log("user_delete", username + ":" + role)
+    db.session.commit()
+    flash("Usuário excluído.", "success")
     return redirect(url_for("users"))
 
 @app.post("/admin/users/<int:uid>/toggle")
