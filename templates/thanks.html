@@ -1,1 +1,16 @@
-{% extends "base.html" %}{% block content %}<div class="card narrow center"><div class="success-icon">✓</div><h1>Obrigado pela participação!</h1><p>Agradecemos seu interesse em contribuir com a melhoria contínua do Shopping Carpina.</p>{% if sent %}<p>Um comprovante com suas respostas foi encaminhado para o e-mail informado.</p>{% endif %}<a class="btn" href="{{url_for('index')}}">Página inicial</a></div>{% endblock %}
+{% extends "base.html" %}{% block content %}<div class="card narrow center"><div class="success-icon">✓</div><h1>Obrigado pela participação!</h1><p>Agradecemos seu interesse em contribuir com a melhoria contínua do Shopping Carpina.</p>{% if sent %}<p>Um comprovante com suas respostas foi encaminhado para o e-mail informado.</p>{% endif %}<p id="redirectNotice" role="status" aria-live="polite">Você será redirecionado para o site do Shopping Carpina em <span id="redirectCountdown">10</span> segundos.</p><a class="btn" href="https://shoppingcarpina.com.br/">Página inicial</a></div>
+<script>
+(() => {
+  const destination = 'https://shoppingcarpina.com.br/';
+  const countdown = document.getElementById('redirectCountdown');
+  let remaining = 10;
+  const timer = window.setInterval(() => {
+    remaining -= 1;
+    countdown.textContent = String(remaining);
+    if (remaining <= 0) {
+      window.clearInterval(timer);
+      window.location.assign(destination);
+    }
+  }, 1000);
+})();
+</script>{% endblock %}
