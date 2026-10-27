@@ -291,6 +291,36 @@ class SurveyAlert(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), default=now)
     action_plan_id = db.Column(db.Integer, db.ForeignKey("action_plan.id"))
 
+class AlertSettings(db.Model):
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    nps_drop_points = db.Column(db.Integer, nullable=False, default=10)
+    low_score_threshold = db.Column(db.Integer, nullable=False, default=3)
+    low_score_max = db.Column(db.Integer, nullable=False, default=2)
+    minimum_sample = db.Column(db.Integer, nullable=False, default=3)
+    updated_at = db.Column(db.DateTime(timezone=True), default=now)
+
+class SectorGoal(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=True)
+    sector = db.Column(db.String(50), nullable=False)
+    period_key = db.Column(db.String(7), nullable=False)
+    metric = db.Column(db.String(12), nullable=False)
+    target = db.Column(db.Float, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=now)
+    survey = db.relationship("Survey")
+
+class ReportSchedule(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    recipient_email = db.Column(db.String(255), nullable=False)
+    sector = db.Column(db.String(50), nullable=False)
+    frequency = db.Column(db.String(10), nullable=False)
+    weekday = db.Column(db.Integer, nullable=False, default=0)
+    month_day = db.Column(db.Integer, nullable=False, default=1)
+    send_hour = db.Column(db.Integer, nullable=False, default=8)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    last_sent_period = db.Column(db.String(20), default="")
+    created_at = db.Column(db.DateTime(timezone=True), default=now)
+
 class SurveyInvite(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     survey_id = db.Column(db.Integer, db.ForeignKey("survey.id"), nullable=False)
@@ -487,6 +517,11 @@ def evaluate_survey_alerts(survey_id):
     current = now()
     recent_start = current - timedelta(days=30)
     prior_start = current - timedelta(days=60)
+    settings = db.session.get(AlertSettings, 1)
+    minimum_sample = settings.minimum_sample if settings else 3
+    low_score_threshold = settings.low_score_threshold if settings else 3
+    low_score_max = settings.low_score_max if settings else 2
+    nps_drop_points = settings.nps_drop_points if settings else 10
     period_key = current.astimezone(RECIFE_TZ).strftime("%Y-%m")
     questions = Question.query.filter_by(survey_id=survey_id, active=True).filter(Question.answer_type.in_(('rating', 'nps'))).all()
     for question in questions:
@@ -496,16 +531,16 @@ def evaluate_survey_alerts(survey_id):
         recent = [int(row.rating) for row in q.filter(Response.submitted_at >= recent_start).all()]
         alert_type, summary = None, ""
         if question.answer_type == "rating":
-            low = sum(1 for value in recent if value in (1, 2))
-            if low >= 3:
+            low = sum(1 for value in recent if 1 <= value <= low_score_max)
+            if low >= low_score_threshold:
                 alert_type = "low_scores"
-                summary = "%s avaliações baixas (nota 1 ou 2) nos últimos 30 dias em %s." % (low, question.sector)
+                summary = "%s avaliações baixas (nota 1 a %s) nos últimos 30 dias em %s." % (low, low_score_max, question.sector)
         else:
             prior = [int(row.rating) for row in q.filter(Response.submitted_at >= prior_start, Response.submitted_at < recent_start).all()]
-            if len(recent) >= 3 and len(prior) >= 3:
+            if len(recent) >= minimum_sample and len(prior) >= minimum_sample:
                 current_nps = round((sum(value >= 9 for value in recent) - sum(value <= 6 for value in recent)) / len(recent) * 100)
                 prior_nps = round((sum(value >= 9 for value in prior) - sum(value <= 6 for value in prior)) / len(prior) * 100)
-                if prior_nps - current_nps >= 10:
+                if prior_nps - current_nps >= nps_drop_points:
                     alert_type = "nps_decline"
                     summary = "NPS caiu %s pontos nos últimos 30 dias em %s (%s → %s)." % (prior_nps - current_nps, question.sector, prior_nps, current_nps)
         if alert_type:
@@ -574,6 +609,54 @@ def dashboard_comparisons(survey_id, compare_survey_id, accessible, sector):
         prior_start_local.month, prior_start_local.year, prior_end_local.day)
     return {"period": period_rows, "survey": survey_rows, "period_label": label}
 
+def dashboard_goal_results(accessible, selected_survey, selected_sector, date_from):
+    if date_from:
+        try:
+            selected_date = datetime.strptime(date_from, "%Y-%m-%d").date()
+        except ValueError:
+            selected_date = now().astimezone(RECIFE_TZ).date()
+    else:
+        selected_date = now().astimezone(RECIFE_TZ).date()
+    period_key = selected_date.strftime("%Y-%m")
+    month_start = selected_date.replace(day=1)
+    start_at = datetime.combine(month_start, datetime.min.time(), RECIFE_TZ).astimezone(timezone.utc)
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    end_at = datetime.combine(next_month, datetime.min.time(), RECIFE_TZ).astimezone(timezone.utc)
+    query = SectorGoal.query.filter_by(period_key=period_key).filter(SectorGoal.sector.in_(accessible))
+    if selected_sector in accessible:
+        query = query.filter(SectorGoal.sector == selected_sector)
+    if selected_survey:
+        query = query.filter(db.or_(SectorGoal.survey_id.is_(None), SectorGoal.survey_id == selected_survey))
+    goals = query.order_by(SectorGoal.sector, SectorGoal.metric).all() if accessible else []
+    results = []
+    for goal in goals:
+        questions = Question.query.filter_by(sector=goal.sector, active=True,
+            answer_type="nps" if goal.metric == "nps" else "rating")
+        if goal.survey_id:
+            questions = questions.filter_by(survey_id=goal.survey_id)
+        elif selected_survey:
+            questions = questions.filter_by(survey_id=selected_survey)
+        questions = questions.all()
+        ratings = (db.session.query(Answer.rating).join(Response, Response.id == Answer.response_id)
+            .filter(Answer.question_id.in_([q.id for q in questions]) if questions else db.false())
+            .filter(Response.submitted_at >= start_at, Response.submitted_at < end_at).all())
+        values = [int(row[0]) for row in ratings if row[0] is not None and (goal.metric == "nps" or int(row[0]) > 0)]
+        if len(values) < 3:
+            current_value = None
+        elif goal.metric == "nps":
+            current_value = round((sum(v >= 9 for v in values) - sum(v <= 6 for v in values)) / len(values) * 100)
+        else:
+            current_value = round(sum(values) / len(values), 2)
+        if current_value is None:
+            progress = 0
+        elif goal.metric == "nps":
+            progress = 100 if goal.target <= -100 else round(max(0, min(100, (current_value + 100) / (goal.target + 100) * 100)))
+        else:
+            progress = 100 if goal.target <= 0 and current_value >= goal.target else round(max(0, min(100, current_value / goal.target * 100))) if goal.target > 0 else 0
+        results.append({"goal": goal, "value": current_value, "count": len(values), "progress": progress,
+            "met": current_value is not None and current_value >= goal.target})
+    return period_key, results
+
 def xlsx_column(index):
     result = ""
     while index:
@@ -635,6 +718,7 @@ def dashboard():
         participation[survey.id] = {"invited": tracked, "completed": completed,
             "rate": round(completed / tracked * 100, 1) if tracked else 0}
     comparisons = dashboard_comparisons(selected_survey, compare_survey, accessible, selected_sector)
+    goals_period, goal_results = dashboard_goal_results(accessible, selected_survey, selected_sector, date_from)
     comment_themes = Counter(theme for detail in question_details for answer in detail["open_answers"] for theme in answer["themes"])
     log("dashboard_view", ",".join(accessible))
     db.session.commit()
@@ -644,7 +728,81 @@ def dashboard():
         date_from=date_from, date_to=date_to, trends=trends, question_details=question_details,
         compare_survey=compare_survey, comparisons=comparisons, alerts=alerts,
         participation=participation, comment_themes=comment_themes,
+        goal_results=goal_results, goals_period=goals_period,
         survey_titles={item.id: item.title for item in surveys})
+
+@app.route("/admin/goals", methods=["GET", "POST"])
+@roles("master")
+def manage_goals():
+    if request.method == "POST":
+        sector = request.form.get("sector", "")
+        period_key = request.form.get("period_key", "")
+        metric = request.form.get("metric", "")
+        survey_id = request.form.get("survey_id", type=int) or None
+        try:
+            datetime.strptime(period_key + "-01", "%Y-%m-%d")
+            target = float(request.form.get("target", ""))
+        except (TypeError, ValueError):
+            abort(400)
+        if sector not in SECTORS or metric not in ("average", "nps") or not (0 <= target <= 5 if metric == "average" else -100 <= target <= 100):
+            abort(400)
+        if survey_id and not db.session.get(Survey, survey_id):
+            abort(400)
+        goal = SectorGoal.query.filter_by(survey_id=survey_id, sector=sector, period_key=period_key, metric=metric).first()
+        if not goal:
+            goal = SectorGoal(survey_id=survey_id, sector=sector, period_key=period_key, metric=metric, target=target)
+            db.session.add(goal)
+            event = "goal_create"
+        else:
+            goal.target = target
+            event = "goal_update"
+        log(event, "goal:%s sector:%s period:%s metric:%s" % (goal.id or "new", sector, period_key, metric))
+        db.session.commit()
+        flash("Meta salva para o setor e período selecionados.", "success")
+        return redirect(url_for("manage_goals"))
+    goals = SectorGoal.query.order_by(SectorGoal.period_key.desc(), SectorGoal.sector, SectorGoal.metric).all()
+    surveys = Survey.query.order_by(Survey.title).all()
+    return render_template("goals.html", goals=goals, surveys=surveys, sectors=SECTORS,
+        current_period=now().astimezone(RECIFE_TZ).strftime("%Y-%m"))
+
+@app.post("/admin/goals/<int:goal_id>/delete")
+@roles("master")
+def delete_goal(goal_id):
+    goal = db.get_or_404(SectorGoal, goal_id)
+    log("goal_delete", "goal:%s sector:%s period:%s" % (goal.id, goal.sector, goal.period_key))
+    db.session.delete(goal)
+    db.session.commit()
+    flash("Meta removida.", "success")
+    return redirect(url_for("manage_goals"))
+
+@app.route("/admin/alerts/settings", methods=["GET", "POST"])
+@roles("master")
+def configure_alerts():
+    settings = db.session.get(AlertSettings, 1)
+    if not settings:
+        settings = AlertSettings(id=1)
+        db.session.add(settings)
+        db.session.flush()
+    if request.method == "POST":
+        try:
+            nps_drop = int(request.form.get("nps_drop_points", ""))
+            low_threshold = int(request.form.get("low_score_threshold", ""))
+            low_max = int(request.form.get("low_score_max", ""))
+            minimum_sample = int(request.form.get("minimum_sample", ""))
+        except (TypeError, ValueError):
+            abort(400)
+        if not (1 <= nps_drop <= 100 and 1 <= low_threshold <= 10000 and 1 <= low_max <= 5 and 3 <= minimum_sample <= 10000):
+            abort(400)
+        settings.nps_drop_points = nps_drop
+        settings.low_score_threshold = low_threshold
+        settings.low_score_max = low_max
+        settings.minimum_sample = minimum_sample
+        settings.updated_at = now()
+        log("alert_settings_update", "nps_drop:%s low_count:%s low_max:%s minimum_sample:%s" % (nps_drop, low_threshold, low_max, minimum_sample))
+        db.session.commit()
+        flash("Limites dos alertas atualizados.", "success")
+        return redirect(url_for("configure_alerts"))
+    return render_template("alert_settings.html", settings=settings)
 
 @app.get("/dashboard/print")
 @login_required
@@ -1089,6 +1247,11 @@ def edit_survey(sid):
             except ValueError as exc:
                 flash(str(exc) or "Informe as datas no formato correto.", "error")
             else:
+                before = {
+                    "title": survey.title, "description": survey.description or "", "target": survey.target,
+                    "active": survey.active, "identity_type": survey.identity_type, "response_limit": survey.response_limit,
+                    "shuffle_questions": survey.shuffle_questions, "starts_at": survey.starts_at, "ends_at": survey.ends_at,
+                }
                 survey.title = request.form.get("title", survey.title)[:200]
                 survey.description = request.form.get("description", "")[:2000]
                 survey.target = target
@@ -1097,7 +1260,8 @@ def edit_survey(sid):
                 survey.response_limit = response_limit
                 survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
                 survey.starts_at, survey.ends_at = starts_at, ends_at
-                log("survey_update", str(sid))
+                changed = [field for field, old_value in before.items() if old_value != getattr(survey, field)]
+                log("survey_update", "survey:%s changed_fields:%s" % (sid, ",".join(changed) or "none"))
                 if request.form.get("save_draft") == "yes":
                     flash("Rascunho salvo. Ele continuará fechado para respostas.", "success")
         elif kind == "question":
@@ -1119,8 +1283,10 @@ def edit_survey(sid):
             elif answer_type in ("single", "multiple") and choices is None:
                 flash("Informe de 2 a 20 opções exclusivas, uma por linha, com até 200 caracteres cada.", "error")
             elif sector in SECTORS and text:
-                db.session.add(Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), branch_question_id=branch_parent.id if branch_parent else None, branch_value=branch_value if branch_parent else "", optional=request.form.get("optional") == "on"))
-                log("question_create", str(sid))
+                question = Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), branch_question_id=branch_parent.id if branch_parent else None, branch_value=branch_value if branch_parent else "", optional=request.form.get("optional") == "on")
+                db.session.add(question)
+                db.session.flush()
+                log("question_create", "survey:%s question:%s fields:sector,text,type,optional,notice,choices,branch" % (sid, question.id))
                 flash("Pergunta adicionada e salva automaticamente.", "success")
         elif kind == "move_question":
             q = db.get_or_404(Question, int(request.form.get("question_id", 0)))
@@ -1142,8 +1308,11 @@ def edit_survey(sid):
                     q.active = False
                 else:
                     db.session.delete(q)
-                log("question_remove", str(q.id))
+                log("question_remove", "survey:%s question:%s" % (sid, q.id))
             else:
+                before = {"text": q.text, "active": q.active, "optional": q.optional, "notice": q.notice or "",
+                    "answer_type": q.answer_type, "choices": q.choices, "branch_question_id": q.branch_question_id,
+                    "branch_value": q.branch_value}
                 q.text = request.form.get("text", q.text)[:1000]
                 q.active = request.form.get("active") == "on"
                 q.optional = request.form.get("optional") == "on"
@@ -1170,7 +1339,8 @@ def edit_survey(sid):
                         flash("Escolha uma resposta válida para a condição da pergunta.", "error")
                 else:
                     q.branch_question_id, q.branch_value = None, ""
-                log("question_update", str(q.id))
+                changed = [field for field, old_value in before.items() if old_value != getattr(q, field)]
+                log("question_update", "survey:%s question:%s changed_fields:%s" % (sid, q.id, ",".join(changed) or "none"))
         db.session.commit()
         return redirect(url_for("edit_survey", sid=sid))
     invite_total = SurveyInvite.query.filter_by(survey_id=sid).count()
@@ -1717,6 +1887,164 @@ def smtp_form_values(config):
         "username": config.username if config and config.username else os.environ.get("SMTP_USER", ""),
         "from_address": config.from_address if config and config.from_address else os.environ.get("SMTP_FROM", ""),
     }
+
+@app.route("/admin/reports/schedules", methods=["GET", "POST"])
+@roles("master")
+def manage_report_schedules():
+    if request.method == "POST":
+        recipient = request.form.get("recipient_email", "").strip().lower()
+        sector = request.form.get("sector", "")
+        frequency = request.form.get("frequency", "")
+        try:
+            weekday = int(request.form.get("weekday", "0"))
+            month_day = int(request.form.get("month_day", "1"))
+            send_hour = int(request.form.get("send_hour", "8"))
+        except ValueError:
+            abort(400)
+        if (not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", recipient) or len(recipient) > 255
+            or sector not in SECTORS or frequency not in ("weekly", "monthly")
+            or not 0 <= weekday <= 6 or not 1 <= month_day <= 28 or not 0 <= send_hour <= 23):
+            abort(400)
+        schedule = ReportSchedule(recipient_email=recipient, sector=sector, frequency=frequency,
+            weekday=weekday, month_day=month_day, send_hour=send_hour)
+        db.session.add(schedule)
+        db.session.flush()
+        log("report_schedule_create", "schedule:%s frequency:%s sector:%s" % (schedule.id, frequency, sector))
+        db.session.commit()
+        flash("Relatório agendado. O envio usará somente indicadores agregados do setor escolhido.", "success")
+        return redirect(url_for("manage_report_schedules"))
+    schedules = ReportSchedule.query.order_by(ReportSchedule.id.desc()).all()
+    return render_template("report_schedules.html", schedules=schedules, sectors=SECTORS)
+
+@app.post("/admin/reports/schedules/<int:schedule_id>/toggle")
+@roles("master")
+def toggle_report_schedule(schedule_id):
+    schedule = db.get_or_404(ReportSchedule, schedule_id)
+    schedule.active = not schedule.active
+    log("report_schedule_toggle", "schedule:%s active:%s" % (schedule.id, schedule.active))
+    db.session.commit()
+    return redirect(url_for("manage_report_schedules"))
+
+@app.post("/admin/reports/schedules/<int:schedule_id>/delete")
+@roles("master")
+def delete_report_schedule(schedule_id):
+    schedule = db.get_or_404(ReportSchedule, schedule_id)
+    log("report_schedule_delete", "schedule:%s" % schedule.id)
+    db.session.delete(schedule)
+    db.session.commit()
+    flash("Agendamento removido.", "success")
+    return redirect(url_for("manage_report_schedules"))
+
+def build_scheduled_report_pdf(schedule, start_at, end_at, period_label):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from xml.sax.saxutils import escape
+    output = io.BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, rightMargin=16*mm, leftMargin=16*mm, topMargin=16*mm, bottomMargin=16*mm)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ScheduleSmall", parent=styles["BodyText"], fontSize=8, leading=10))
+    story = [Paragraph("Relatório de satisfação", styles["Title"]),
+        Paragraph("Setor: %s · Período: %s" % (escape(schedule.sector), escape(period_label)), styles["BodyText"]),
+        Paragraph("Somente indicadores agregados. Nenhum dado de identificação ou resposta individual está neste relatório.", styles["ScheduleSmall"]), Spacer(1, 6*mm)]
+    metric_filter = db.or_(
+        db.and_(Question.answer_type == "rating", Answer.rating.between(1, 5)),
+        db.and_(Question.answer_type == "nps", Answer.rating.between(0, 10)))
+    rows = (db.session.query(Survey.title, Question.text, Question.answer_type, db.func.count(Answer.id),
+            db.func.avg(db.case((Question.answer_type == "rating", Answer.rating), else_=None)),
+            db.func.sum(db.case((Answer.rating >= 9, 1), else_=0)),
+            db.func.sum(db.case((Answer.rating <= 6, 1), else_=0)))
+        .join(Question, Question.survey_id == Survey.id)
+        .join(Answer, Answer.question_id == Question.id)
+        .join(Response, Response.id == Answer.response_id)
+        .filter(Question.sector == schedule.sector, Question.answer_type.in_(("rating", "nps")), metric_filter,
+            Response.submitted_at >= start_at, Response.submitted_at < end_at)
+        .group_by(Survey.title, Question.text, Question.answer_type).order_by(Survey.title, Question.text).all())
+    table_data = [["Pesquisa / pergunta", "Métrica", "Respostas"]]
+    minimum = 3
+    for title, question, kind, count, average, promoters, detractors in rows:
+        count = int(count or 0)
+        if count < minimum:
+            metric = "Oculto (menos de 3 respostas)"
+        elif kind == "nps":
+            metric = "NPS %s" % round((int(promoters or 0) - int(detractors or 0)) / count * 100)
+        else:
+            metric = "Média %.2f / 5" % float(average)
+        count_label = str(count) if count >= minimum else "Oculto (<3)"
+        table_data.append([Paragraph("<b>%s</b><br/>%s" % (escape(title), escape(question)), styles["ScheduleSmall"]), metric, count_label])
+    if len(table_data) == 1:
+        story.append(Paragraph("Não houve respostas para os filtros e período informados.", styles["BodyText"]))
+    else:
+        table = Table(table_data, colWidths=[112*mm, 44*mm, 24*mm], repeatRows=1)
+        table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#141F39")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white), ("GRID", (0,0), (-1,-1), .3, colors.HexColor("#ccd7d7")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"), ("FONTSIZE", (0,0), (-1,-1), 8), ("PADDING", (0,0), (-1,-1), 6)]))
+        story.append(table)
+    doc.build(story)
+    return output.getvalue()
+
+def deliver_scheduled_report(schedule, run_at):
+    if schedule.frequency == "weekly":
+        current_week_start = (run_at.date() - timedelta(days=run_at.weekday()))
+        start_date = current_week_start - timedelta(days=7)
+        end_date = current_week_start
+        period_key = "W:%04d-%02d" % (run_at.isocalendar().year, run_at.isocalendar().week)
+        label = "%s a %s" % ((start_date).strftime("%d/%m/%Y"), (end_date - timedelta(days=1)).strftime("%d/%m/%Y"))
+    else:
+        current_month_start = run_at.date().replace(day=1)
+        previous_month_end = current_month_start - timedelta(days=1)
+        previous_month_start = previous_month_end.replace(day=1)
+        start_date, end_date = previous_month_start, current_month_start
+        period_key = "M:%04d-%02d" % (current_month_start.year, current_month_start.month)
+        label = previous_month_start.strftime("%m/%Y")
+    start_at = datetime.combine(start_date, datetime.min.time(), RECIFE_TZ).astimezone(timezone.utc)
+    end_at = datetime.combine(end_date, datetime.min.time(), RECIFE_TZ).astimezone(timezone.utc)
+    report = build_scheduled_report_pdf(schedule, start_at, end_at, label)
+    settings = effective_smtp_settings()
+    if not settings["host"] or not settings["from_address"]:
+        return False
+    message = EmailMessage()
+    message["Subject"] = "Relatório %s de pesquisas — %s" % ("semanal" if schedule.frequency == "weekly" else "mensal", schedule.sector)
+    message["From"] = settings["from_address"]
+    message["To"] = schedule.recipient_email
+    message.set_content("Segue o relatório agregado de pesquisas do setor selecionado. Resultados individuais e dados de identificação não são incluídos.")
+    message.add_attachment(report, maintype="application", subtype="pdf", filename="relatorio_pesquisa.pdf")
+    try:
+        with smtplib.SMTP(settings["host"], int(settings["port"]), timeout=20) as smtp:
+            if settings["tls"]:
+                smtp.starttls()
+            if settings["username"]:
+                smtp.login(settings["username"], settings["password"])
+            smtp.send_message(message)
+    except Exception:
+        app.logger.exception("Falha ao entregar relatório agendado de pesquisas")
+        return False
+    schedule.last_sent_period = period_key
+    log("report_schedule_sent", "schedule:%s period:%s" % (schedule.id, period_key), actor="sistema")
+    db.session.commit()
+    return True
+
+@app.cli.command("send-scheduled-reports")
+def send_scheduled_reports_command():
+    """Send due aggregate PDF reports; schedule this command every 15 minutes."""
+    run_at = now().astimezone(RECIFE_TZ)
+    sent = 0
+    schedules = ReportSchedule.query.filter_by(active=True, send_hour=run_at.hour).all()
+    if run_at.minute <= 15:
+        for schedule in schedules:
+            if schedule.frequency == "weekly" and schedule.weekday != run_at.weekday():
+                continue
+            if schedule.frequency == "monthly" and schedule.month_day != run_at.day:
+                continue
+            key = ("W:%04d-%02d" % (run_at.isocalendar().year, run_at.isocalendar().week)
+                if schedule.frequency == "weekly" else "M:%04d-%02d" % (run_at.year, run_at.month))
+            if schedule.last_sent_period == key:
+                continue
+            sent += int(deliver_scheduled_report(schedule, run_at))
+    click_echo = "Relatórios enviados: %d" % sent
+    print(click_echo)
 
 def send_receipt(resp, survey, questions, answers, email):
     if not email:

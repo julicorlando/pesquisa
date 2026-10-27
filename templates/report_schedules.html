@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% block content %}
+<h1>Relatórios agendados</h1>
+<p>Os PDFs contêm somente indicadores agregados de um setor. Comentários abertos, identificações e respostas individuais não são enviados por e-mail.</p>
+<section class="card"><h2>Novo agendamento</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label>E-mail destinatário<input type="email" name="recipient_email" autocomplete="email" maxlength="255" required></label>
+<label>Setor permitido no relatório<select name="sector" required>{% for sector in sectors %}<option>{{ sector }}</option>{% endfor %}</select></label>
+<label>Frequência<select name="frequency" id="frequency"><option value="weekly">Semanal</option><option value="monthly">Mensal</option></select></label>
+<label>Dia da semana (para semanal)<select name="weekday">{% for value,label in [(0,'Segunda-feira'),(1,'Terça-feira'),(2,'Quarta-feira'),(3,'Quinta-feira'),(4,'Sexta-feira'),(5,'Sábado'),(6,'Domingo')] %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label>
+<label>Dia do mês (para mensal)<input type="number" name="month_day" min="1" max="28" value="1"></label>
+<label>Hora local (Recife)<input type="number" name="send_hour" min="0" max="23" value="8" required></label>
+<p class="muted">O relatório é enviado após o período completo anterior. O envio automático depende do agendador do Coolify.</p><button class="btn">Agendar relatório</button></form></section>
+<h2>Agendamentos</h2><div class="tablewrap"><table><thead><tr><th>E-mail</th><th>Setor</th><th>Frequência</th><th>Horário</th><th>Status</th><th>Ações</th></tr></thead><tbody>
+{% for item in schedules %}<tr><td>{{ item.recipient_email }}</td><td>{{ item.sector }}</td><td>{% if item.frequency=='weekly' %}Semanal · {{ ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'][item.weekday] }}{% else %}Mensal · dia {{ item.month_day }}{% endif %}</td><td>{{ '%02d'|format(item.send_hour) }}:00</td><td>{{ 'Ativo' if item.active else 'Pausado' }}</td><td><form class="inline" method="post" action="{{ url_for('toggle_report_schedule', schedule_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn secondary">{{ 'Pausar' if item.active else 'Ativar' }}</button></form> <form class="inline" method="post" action="{{ url_for('delete_report_schedule', schedule_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn secondary" aria-label="Excluir agendamento para {{ item.sector }}">Excluir</button></form></td></tr>
+{% else %}<tr><td colspan="6">Nenhum relatório agendado.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

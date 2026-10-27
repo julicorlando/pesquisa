@@ -3,10 +3,11 @@ import io
 import hashlib
 import zipfile
 from datetime import datetime, timezone, timedelta
+import app as app_module
 os.environ["SECRET_KEY"] = "test-secret-is-only-for-tests-not-production"
 os.environ["DATABASE_URL"] = "sqlite://"
 import pytest
-from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, Question, Response, Answer, ActionPlan, RespondentIdentity, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment
+from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, AlertSettings, SectorGoal, ReportSchedule, SMTPConfig, Question, Response, Answer, ActionPlan, RespondentIdentity, Audit, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment
 
 @pytest.fixture()
 def client():
@@ -343,3 +344,98 @@ def test_tracked_invitation_updates_aggregate_participation_without_answer_link(
 
 def test_comment_theme_classifier_handles_multiple_topics():
     assert set(classify_comment("A vaga estava suja e a cancela demorou")) == {"Estacionamento", "Limpeza"}
+
+def test_master_can_adjust_alert_thresholds_and_low_score_rule_uses_them(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey=Survey(title="Limites",slug="limites",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        question=Question(survey_id=survey.id,sector="Estacionamento",text="Nota?",position=1,answer_type="rating")
+        db.session.add(question);db.session.flush()
+        for rating in (3, 3):
+            response=Response(survey_id=survey.id,submitted_at=now())
+            db.session.add(response);db.session.flush()
+            db.session.add(Answer(response_id=response.id,question_id=question.id,rating=rating))
+        db.session.commit()
+    signin(client,"master","long-test-pass")
+    result=client.post("/admin/alerts/settings",data={"nps_drop_points":"15","low_score_threshold":"2","low_score_max":"3","minimum_sample":"4"},follow_redirects=True)
+    assert result.status_code==200 and b"Limites dos alertas atualizados" in result.data
+    page=client.get("/dashboard")
+    assert page.status_code==200 and b"Avalia\xc3\xa7\xc3\xb5es baixas" in page.data
+    with app.app_context():
+        settings=db.session.get(AlertSettings,1)
+        assert (settings.nps_drop_points,settings.low_score_threshold,settings.low_score_max,settings.minimum_sample)==(15,2,3,4)
+        assert Audit.query.filter_by(event="alert_settings_update").count()==1
+
+def test_sector_goal_appears_only_to_profiles_with_sector_access(client):
+    period=now().astimezone(app_module.RECIFE_TZ).strftime("%Y-%m")
+    with app.app_context():
+        db.session.add(User(username="parking",password_hash=generate_password_hash("long-test-pass"),role="estacionamento"))
+        survey=Survey(title="Meta",slug="meta",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        question=Question(survey_id=survey.id,sector="Estacionamento",text="Avaliação",position=1,answer_type="rating")
+        db.session.add(question);db.session.flush()
+        db.session.add_all([SectorGoal(survey_id=survey.id,sector="Estacionamento",period_key=period,metric="average",target=4.0),
+            SectorGoal(sector="Marketing",period_key=period,metric="average",target=4.5)])
+        for rating in (4,5,4):
+            response=Response(survey_id=survey.id,submitted_at=now())
+            db.session.add(response);db.session.flush()
+            db.session.add(Answer(response_id=response.id,question_id=question.id,rating=rating))
+        db.session.commit()
+    signin(client,"parking","long-test-pass")
+    page=client.get("/dashboard")
+    assert page.status_code==200 and b"Meta atingida" in page.data
+    assert b"Marketing" not in page.data
+    assert client.get("/admin/goals").status_code==403
+
+def test_survey_audit_records_changed_fields_without_question_content(client):
+    with app.app_context():
+        db.session.add(User(username="master",password_hash=generate_password_hash("long-test-pass"),role="master"))
+        db.session.add(Survey(title="Original",slug="audit",active=False,target="publico"))
+        db.session.commit()
+    signin(client,"master","long-test-pass")
+    result=client.post("/admin/surveys/1",data={"kind":"settings","title":"Novo nome","description":"Descrição","target":"publico","identity_type":"none","response_limit":"none","active":"on","shuffle_questions":"on"})
+    assert result.status_code==302
+    with app.app_context():
+        event=Audit.query.filter_by(event="survey_update").one()
+        assert "changed_fields:title" in event.detail and "Novo nome" not in event.detail
+
+def test_scheduled_report_command_sends_aggregate_pdf_once(monkeypatch,client):
+    sent=[]
+    class FakeSMTP:
+        def __init__(self,*args,**kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def starttls(self): pass
+        def login(self,*args): pass
+        def send_message(self,message): sent.append(message)
+    monkeypatch.setattr(app_module.smtplib,"SMTP",FakeSMTP)
+    monkeypatch.setattr(app_module,"now",lambda: datetime(2026,10,27,11,5,tzinfo=timezone.utc))
+    with app.app_context():
+        db.session.add(ReportSchedule(recipient_email="gestor@example.com",sector="Estacionamento",frequency="weekly",weekday=1,month_day=1,send_hour=8))
+        db.session.add(SMTPConfig(host="smtp.example.com",port=587,tls=True,from_address="noreply@example.com"))
+        db.session.commit()
+    runner=app.test_cli_runner()
+    first=runner.invoke(args=["send-scheduled-reports"])
+    second=runner.invoke(args=["send-scheduled-reports"])
+    assert first.exit_code==0 and "Relatórios enviados: 1" in first.output
+    assert second.exit_code==0 and "Relatórios enviados: 0" in second.output
+    assert len(sent)==1 and sent[0]["To"]=="gestor@example.com"
+    attachment=list(sent[0].iter_attachments())[0]
+    assert attachment.get_content_type()=="application/pdf"
+    with app.app_context():
+        schedule=ReportSchedule.query.one()
+        assert schedule.last_sent_period=="W:2026-44"
+        assert Audit.query.filter_by(event="report_schedule_sent").count()==1
+
+def test_keyboard_accessibility_is_present_on_public_survey(client):
+    with app.app_context():
+        survey=Survey(title="Acessível",slug="a11y",active=True,target="publico")
+        db.session.add(survey);db.session.flush()
+        db.session.add(Question(survey_id=survey.id,sector="Geral",text="Pergunta?",position=1))
+        db.session.commit()
+    home=client.get("/")
+    assert b"Pular para o conte\xc3\xbado principal" in home.data
+    client.post("/p/a11y",data={"stage":"identity"})
+    page=client.get("/p/a11y/responder")
+    assert page.status_code==200 and b"aria-valuenow" in page.data and b"tabindex=\"-1\"" in page.data

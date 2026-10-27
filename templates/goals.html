@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% block content %}
+<h1>Metas por setor e período</h1>
+<p>Defina uma meta mensal de média de avaliação ou NPS. Os resultados com menos de 3 respostas permanecem ocultos.</p>
+<section class="card"><h2>Nova ou atualizar meta</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label>Setor<select name="sector" required>{% for sector in sectors %}<option>{{ sector }}</option>{% endfor %}</select></label>
+<label>Pesquisa<select name="survey_id"><option value="">Todas as pesquisas do setor</option>{% for survey in surveys %}<option value="{{ survey.id }}">{{ survey.title }}</option>{% endfor %}</select></label>
+<label>Mês<input type="month" name="period_key" value="{{ current_period }}" required></label>
+<label>Indicador<select name="metric"><option value="average">Média das avaliações (0 a 5)</option><option value="nps">NPS (-100 a 100)</option></select></label>
+<label>Meta numérica<input type="number" name="target" min="-100" max="100" step="0.1" required aria-describedby="goal-help"></label><p id="goal-help" class="muted">Para média, informe de 0 a 5. Para NPS, de -100 a 100.</p>
+<button class="btn">Salvar meta</button></form></section>
+<h2>Metas cadastradas</h2><div class="tablewrap"><table><thead><tr><th>Período</th><th>Setor</th><th>Pesquisa</th><th>Indicador</th><th>Alvo</th><th>Ação</th></tr></thead><tbody>
+{% for goal in goals %}<tr><td>{{ goal.period_key }}</td><td>{{ goal.sector }}</td><td>{{ goal.survey.title if goal.survey_id and goal.survey else 'Todas' }}</td><td>{{ 'Média / 5' if goal.metric=='average' else 'NPS' }}</td><td>{{ goal.target }}</td><td><form method="post" action="{{ url_for('delete_goal', goal_id=goal.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn secondary" aria-label="Excluir meta de {{ goal.sector }} de {{ goal.period_key }}">Excluir</button></form></td></tr>
+{% else %}<tr><td colspan="6">Nenhuma meta cadastrada.</td></tr>{% endfor %}</tbody></table></div>{% endblock %}

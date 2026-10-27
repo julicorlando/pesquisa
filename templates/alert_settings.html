@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block content %}
+<h1>Validação dos alertas</h1><p>Os alertas são calculados ao atualizar o painel. Eles aparecem somente para perfis autorizados a ver o setor.</p>
+<section class="card"><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label>Queda mínima de NPS para alertar<input type="number" name="nps_drop_points" min="1" max="100" value="{{ settings.nps_drop_points }}" required><small> Pontos na comparação dos últimos 30 dias com os 30 dias anteriores.</small></label>
+<label>Quantidade de avaliações baixas para alertar<input type="number" name="low_score_threshold" min="1" max="10000" value="{{ settings.low_score_threshold }}" required><small> Abaixo ou igual à nota configurada.</small></label>
+<label>Nota máxima considerada baixa<input type="number" name="low_score_max" min="1" max="5" value="{{ settings.low_score_max }}" required></label>
+<label>Amostra mínima em cada período para alerta de NPS<input type="number" name="minimum_sample" min="3" max="10000" value="{{ settings.minimum_sample }}" required></label>
+<button class="btn">Salvar limites</button></form></section>
+{% endblock %}
