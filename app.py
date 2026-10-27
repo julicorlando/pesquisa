@@ -1,6 +1,8 @@
 import os
 import re
 import base64
+import csv
+import io
 import json
 import hmac
 import hashlib
@@ -13,7 +15,7 @@ from email.message import EmailMessage
 from functools import wraps
 from urllib.parse import urlparse
 
-from flask import Flask, request, redirect, url_for, render_template, flash, abort, session, jsonify
+from flask import Flask, request, redirect, url_for, render_template, flash, abort, session, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf.csrf import CSRFProtect
@@ -341,6 +343,108 @@ def delete_survey(sid):
     db.session.commit()
     flash("Pesquisa e resultados excluídos. Nenhum CPF ou CNPJ estava registrado.", "success")
     return redirect(url_for("manage_surveys"))
+
+def csv_export_value(value):
+    value = "" if value is None else str(value)
+    if value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
+
+def csv_import_value(value):
+    value = (value or "").strip()
+    if len(value) > 1 and value[0] == "'" and value[1] in ("=", "+", "-", "@", "\t", "\r"):
+        return value[1:]
+    return value
+
+def questions_csv_response(filename, rows):
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, delimiter=";", lineterminator="\r\n")
+    writer.writerow(["setor", "enunciado", "tipo_resposta", "opcoes", "aviso"])
+    for row in rows:
+        writer.writerow([csv_export_value(value) for value in row])
+    data = ("\ufeff" + output.getvalue()).encode("utf-8")
+    return send_file(io.BytesIO(data), mimetype="text/csv; charset=utf-8", as_attachment=True, download_name=filename)
+
+@app.get("/admin/questions/model.csv")
+@login_required
+def questions_csv_model():
+    return questions_csv_response("modelo_perguntas_pesquisa.csv", [])
+
+@app.get("/admin/surveys/<int:sid>/questions.csv")
+@login_required
+def export_survey_questions(sid):
+    survey = db.get_or_404(Survey, sid)
+    rows = [
+        (q.sector, q.text, q.answer_type, "|".join(q.choice_options), q.notice or "")
+        for q in Question.query.filter_by(survey_id=sid).order_by(Question.position).all()
+    ]
+    return questions_csv_response("perguntas_" + survey.slug + ".csv", rows)
+
+@app.post("/admin/surveys/<int:sid>/questions/import")
+@login_required
+def import_survey_questions(sid):
+    survey = db.get_or_404(Survey, sid)
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        flash("Selecione um arquivo CSV.", "error")
+        return redirect(url_for("edit_survey", sid=sid))
+    raw = uploaded.read(2 * 1024 * 1024 + 1)
+    if len(raw) > 2 * 1024 * 1024:
+        flash("O arquivo excede o limite de 2 MB.", "error")
+        return redirect(url_for("edit_survey", sid=sid))
+    try:
+        content = raw.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(content, newline=""), delimiter=";")
+        required = {"setor", "enunciado", "tipo_resposta", "opcoes", "aviso"}
+        headers = set(reader.fieldnames or [])
+        if not required.issubset(headers):
+            raise ValueError("Cabeçalhos inválidos. Baixe e use o modelo CSV disponibilizado.")
+        prepared, errors = [], []
+        aliases = {"rating": "rating", "aberta": "open", "open": "open", "multipla_escolha": "single", "single": "single", "multipla_escolha_varias": "multiple", "multiple": "multiple"}
+        for row_number, row in enumerate(reader, start=2):
+            if not any((value or "").strip() for value in row.values() if value is not None):
+                continue
+            if len(prepared) >= 500:
+                errors.append("O limite é de 500 perguntas por arquivo.")
+                break
+            sector = csv_import_value(row.get("setor"))
+            statement = csv_import_value(row.get("enunciado"))
+            raw_type = csv_import_value(row.get("tipo_resposta")).casefold()
+            answer_type = aliases.get(raw_type)
+            notice = csv_import_value(row.get("aviso"))
+            options_raw = csv_import_value(row.get("opcoes"))
+            choices = parse_choices(options_raw.replace("|", "\n")) if answer_type in ("single", "multiple") else []
+            issues = []
+            if sector not in SECTORS:
+                issues.append("setor inválido")
+            if not statement or len(statement) > 1000:
+                issues.append("enunciado obrigatório com até 1.000 caracteres")
+            if not answer_type:
+                issues.append("tipo_resposta inválido")
+            if len(notice) > 500:
+                issues.append("aviso excede 500 caracteres")
+            if answer_type in ("single", "multiple") and choices is None:
+                issues.append("opcoes deve ter 2 a 20 opções exclusivas separadas por |")
+            if issues:
+                errors.append("Linha " + str(row_number) + ": " + "; ".join(issues))
+            else:
+                prepared.append((sector, statement, answer_type, choices, notice))
+        if errors:
+            flash("CSV não importado: " + " | ".join(errors[:10]), "error")
+        elif not prepared:
+            flash("O CSV não contém perguntas para importar.", "error")
+        else:
+            position = len(survey.questions)
+            for offset, item in enumerate(prepared, start=1):
+                sector, statement, answer_type, choices, notice = item
+                db.session.add(Question(survey_id=sid, sector=sector, text=statement, position=position + offset, active=True, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False)))
+            log("questions_csv_import", str(sid) + ":" + str(len(prepared)))
+            db.session.commit()
+            flash(str(len(prepared)) + " pergunta(s) importada(s) e salva(s). As perguntas existentes foram mantidas.", "success")
+    except (UnicodeDecodeError, csv.Error, ValueError) as exc:
+        db.session.rollback()
+        flash("Não foi possível importar o CSV: " + str(exc)[:300], "error")
+    return redirect(url_for("edit_survey", sid=sid))
 
 @app.route("/admin/surveys/<int:sid>", methods=["GET", "POST"])
 @login_required
