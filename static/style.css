@@ -437,3 +437,92 @@ a { text-underline-offset: .18em; }
   .nav-menu > summary { min-height: 40px; padding: 0 8px; }
   .nav-submenu { min-width: min(250px, 82vw); }
 }
+
+/* Rodapé institucional inspirado no site do Shopping Carpina. */
+.site-footer {
+  margin-top: 0;
+  padding: 72px 24px 0;
+  color: #fff;
+  background: #10233a;
+  text-align: left;
+}
+.site-footer-inner { width: min(1360px, 100%); margin: 0 auto; }
+.site-footer-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 34px;
+  min-height: 195px;
+  padding: 0 18%;
+}
+.site-footer-hours h2 {
+  margin: 0 0 18px;
+  color: #f2bd50;
+  font-size: 20px;
+  letter-spacing: .015em;
+}
+.site-footer-hours p {
+  margin: 0 0 5px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.5;
+}
+.site-footer-hours address {
+  color: #98a5b4;
+  font-size: 14px;
+  font-style: normal;
+  font-weight: 700;
+}
+.site-footer-map {
+  display: inline-flex;
+  justify-self: center;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 22px;
+  border-radius: 15px;
+  color: #10233a;
+  background: #fff;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-decoration: none;
+}
+.site-footer-map:hover { color: #007f83; text-decoration: none; }
+.site-footer-map svg { width: 20px; height: 20px; fill: #008b8b; }
+.site-footer-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 42px;
+  min-height: 108px;
+  border-top: 1px solid rgba(255,255,255,.72);
+}
+.site-footer-social { display: flex; align-items: center; gap: 26px; }
+.site-footer-social a { display: grid; width: 32px; height: 32px; place-items: center; color: #fff; }
+.site-footer-social a:hover { color: #f2bd50; }
+.site-footer-social svg { width: 22px; height: 22px; fill: currentColor; }
+.site-footer-social a:last-child svg { fill: none; stroke: currentColor; stroke-width: 2; }
+.site-footer-social .instagram-dot { fill: currentColor; stroke: none; }
+.site-footer-logo { display: block; width: 180px; }
+.site-footer-logo img { display: block; width: 100%; height: auto; filter: brightness(0) invert(1); }
+body.public-site, body.public-site * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+body.public-site input, body.public-site textarea, body.public-site select {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+@media (max-width: 760px) {
+  .site-footer { padding: 38px 22px 0; }
+  .site-footer-main { grid-template-columns: 1fr; gap: 25px; min-height: auto; padding: 0 0 34px; }
+  .site-footer-map { justify-self: start; font-size: 14px; }
+  .site-footer-bottom { justify-content: space-between; gap: 20px; min-height: 86px; }
+  .site-footer-social { gap: 12px; }
+  .site-footer-logo { width: 145px; }
+}
+@media (max-width: 380px) {
+  .site-footer-bottom { align-items: center; }
+  .site-footer-logo { width: 125px; }
+}
