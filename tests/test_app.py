@@ -2,7 +2,7 @@ import os
 os.environ["SECRET_KEY"] = "test-secret-is-only-for-tests-not-production"
 os.environ["DATABASE_URL"] = "sqlite://"
 import pytest
-from app import app, db, User, Merchant, Survey, Question, Response, Answer, ActionPlan, valid_cnpj, generate_password_hash
+from app import app, db, User, Merchant, Survey, Question, Response, Answer, ActionPlan, RespondentIdentity, valid_cnpj, generate_password_hash
 
 @pytest.fixture()
 def client():
@@ -142,3 +142,46 @@ def test_action_plan_and_qr_code_routes(client):
     assert saved.status_code == 200 and b"Revisar acesso" in saved.data
     with app.app_context():
         assert ActionPlan.query.count() == 1
+
+def test_survey_period_is_saved_in_brasilia_time_and_blocks_public_access(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        db.session.add(Survey(title="Agendada", slug="agendada", active=True, target="publico"))
+        db.session.commit()
+    signin(client, "master", "long-test-pass")
+    response = client.post("/admin/surveys/1", data={
+        "kind": "settings", "title": "Agendada", "target": "publico", "identity_type": "none",
+        "starts_at": "2099-04-01T09:00", "ends_at": "2099-04-30T18:00", "active": "on"
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        survey = db.session.get(Survey, 1)
+        assert survey.starts_at.isoformat().startswith("2099-04-01T12:00")
+    public = client.get("/p/agendada")
+    assert public.status_code == 200 and b"Esta pesquisa n\xc3\xa3o est\xc3\xa1 recebendo respostas" in public.data
+    home = client.get("/")
+    assert b"Agendada" not in home.data
+
+def test_master_can_clear_responses_without_deleting_survey_questions_or_action_plans(client):
+    with app.app_context():
+        db.session.add(User(username="master", password_hash=generate_password_hash("long-test-pass"), role="master"))
+        survey = Survey(title="Preservar", slug="preservar", active=True, target="publico")
+        db.session.add(survey); db.session.flush()
+        question = Question(survey_id=survey.id, sector="Geral", text="Pergunta", position=1)
+        db.session.add(question); db.session.flush()
+        response = Response(survey_id=survey.id)
+        db.session.add(response); db.session.flush()
+        db.session.add(Answer(response_id=response.id, question_id=question.id, rating=5))
+        db.session.add(RespondentIdentity(survey_id=survey.id, document_type="cpf", document_number="12345678901"))
+        db.session.add(ActionPlan(survey_id=survey.id, sector="Geral", title="Plano", priority="alta", status="aberto"))
+        db.session.commit()
+    signin(client, "master", "long-test-pass")
+    result = client.post("/admin/surveys/1/clear-responses", follow_redirects=True)
+    assert result.status_code == 200 and b"perguntas foram preservadas" in result.data
+    with app.app_context():
+        assert Survey.query.count() == 1
+        assert Question.query.count() == 1
+        assert ActionPlan.query.count() == 1
+        assert Response.query.count() == 0
+        assert Answer.query.count() == 0
+        assert RespondentIdentity.query.count() == 0

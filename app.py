@@ -11,6 +11,7 @@ import smtplib
 import secrets
 import random
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from functools import wraps
 from urllib.parse import urlparse
@@ -50,6 +51,30 @@ FACE_NAMES = ["Muito insatisfeito", "Insatisfeito", "Regular", "Satisfeito", "Mu
 
 def now():
     return datetime.now(timezone.utc)
+
+RECIFE_TZ = ZoneInfo("America/Recife")
+
+def parse_local_datetime(value):
+    value = (value or "").strip()
+    if not value:
+        return None
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M").replace(tzinfo=RECIFE_TZ).astimezone(timezone.utc)
+
+def as_utc(value):
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+def survey_is_open(survey):
+    current = now()
+    return bool(survey.active and (survey.starts_at is None or as_utc(survey.starts_at) <= current)
+                and (survey.ends_at is None or as_utc(survey.ends_at) >= current))
+
+def local_datetime_input(value):
+    value = as_utc(value)
+    return value.astimezone(RECIFE_TZ).strftime("%Y-%m-%dT%H:%M") if value else ""
+
+app.jinja_env.filters["local_datetime_input"] = local_datetime_input
 
 def clean_name(v):
     v = unicodedata.normalize("NFKD", (v or "").strip().casefold())
@@ -137,6 +162,8 @@ class Survey(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), default=now)
     identity_type = db.Column(db.String(8), nullable=False, default="none")
     shuffle_questions = db.Column(db.Boolean, nullable=False, default=False)
+    starts_at = db.Column(db.DateTime(timezone=True))
+    ends_at = db.Column(db.DateTime(timezone=True))
     questions = db.relationship("Question", backref="survey", order_by="Question.position", cascade="all,delete-orphan")
 
 class Question(db.Model):
@@ -264,7 +291,7 @@ def globals_for_templates():
 
 @app.route("/")
 def index():
-    surveys = Survey.query.filter_by(active=True).order_by(Survey.id.desc()).all()
+    surveys = [s for s in Survey.query.filter_by(active=True).order_by(Survey.id.desc()).all() if survey_is_open(s)]
     return render_template("index.html", surveys=surveys)
 
 @app.route("/login", methods=["GET", "POST"])
@@ -468,6 +495,24 @@ def delete_survey(sid):
     flash("Pesquisa e resultados excluídos. Nenhum CPF ou CNPJ estava registrado.", "success")
     return redirect(url_for("manage_surveys"))
 
+@app.post("/admin/surveys/<int:sid>/clear-responses")
+@roles("master")
+def clear_survey_responses(sid):
+    survey = db.get_or_404(Survey, sid)
+    response_ids = [row[0] for row in db.session.query(Response.id).filter_by(survey_id=sid).all()]
+    answer_count = Answer.query.filter(Answer.response_id.in_(response_ids)).count() if response_ids else 0
+    response_count = len(response_ids)
+    # Remove respostas e identificações armazenadas separadamente desta pesquisa;
+    # perguntas, pesquisa, convites e planos de ação permanecem intactos.
+    if response_ids:
+        Answer.query.filter(Answer.response_id.in_(response_ids)).delete(synchronize_session=False)
+    Response.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    RespondentIdentity.query.filter_by(survey_id=sid).delete(synchronize_session=False)
+    log("survey_responses_cleared", "survey:%s responses:%s answers:%s" % (sid, response_count, answer_count))
+    db.session.commit()
+    flash("Respostas e identificações desta pesquisa removidas. A pesquisa e as perguntas foram preservadas.", "success")
+    return redirect(url_for("edit_survey", sid=sid))
+
 def csv_export_value(value):
     value = "" if value is None else str(value)
     if value.startswith(("=", "+", "-", "@", "\t", "\r")):
@@ -581,16 +626,25 @@ def edit_survey(sid):
     if request.method == "POST":
         kind = request.form.get("kind")
         if kind == "settings":
-            survey.title = request.form.get("title", survey.title)[:200]
-            survey.description = request.form.get("description", "")[:2000]
-            survey.target = request.form.get("target") if request.form.get("target") in ("lojista", "publico") else survey.target
-            survey.active = request.form.get("save_draft") != "yes" and request.form.get("active") == "on"
-            if request.form.get("identity_type") in ("none", "cpf", "cnpj"):
-                survey.identity_type = request.form.get("identity_type")
-            survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
-            log("survey_update", str(sid))
-            if request.form.get("save_draft") == "yes":
-                flash("Rascunho salvo. Ele continuará fechado para respostas.", "success")
+            try:
+                starts_at = parse_local_datetime(request.form.get("starts_at"))
+                ends_at = parse_local_datetime(request.form.get("ends_at"))
+                if starts_at and ends_at and starts_at >= ends_at:
+                    raise ValueError("A data de encerramento precisa ser posterior à data de início.")
+            except ValueError as exc:
+                flash(str(exc) or "Informe as datas no formato correto.", "error")
+            else:
+                survey.title = request.form.get("title", survey.title)[:200]
+                survey.description = request.form.get("description", "")[:2000]
+                survey.target = request.form.get("target") if request.form.get("target") in ("lojista", "publico") else survey.target
+                survey.active = request.form.get("save_draft") != "yes" and request.form.get("active") == "on"
+                if request.form.get("identity_type") in ("none", "cpf", "cnpj"):
+                    survey.identity_type = request.form.get("identity_type")
+                survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
+                survey.starts_at, survey.ends_at = starts_at, ends_at
+                log("survey_update", str(sid))
+                if request.form.get("save_draft") == "yes":
+                    flash("Rascunho salvo. Ele continuará fechado para respostas.", "success")
         elif kind == "question":
             sector = request.form.get("sector")
             text = request.form.get("text", "").strip()
@@ -668,7 +722,8 @@ def edit_survey(sid):
     invite_pending = SurveyInvite.query.filter_by(survey_id=sid, reminder_sent_at=None).count()
     response_count = Response.query.filter_by(survey_id=sid).count()
     return render_template("edit_survey.html", survey=survey, invite_total=invite_total,
-        invite_pending=invite_pending, response_count=response_count)
+        invite_pending=invite_pending, response_count=response_count,
+        starts_at_input=local_datetime_input(survey.starts_at), ends_at_input=local_datetime_input(survey.ends_at))
 
 @app.get("/admin/surveys/<int:sid>/qrcode.png")
 @login_required
@@ -961,7 +1016,9 @@ def audit():
 @app.route("/p/<slug>", methods=["GET", "POST"])
 @limiter.limit("40 per hour")
 def public_survey(slug):
-    s = Survey.query.filter_by(slug=slug, active=True).first_or_404()
+    s = Survey.query.filter_by(slug=slug).first_or_404()
+    if not survey_is_open(s):
+        return render_template("survey_closed.html", survey=s)
     questions = [q for q in s.questions if q.active]
     if not questions:
         abort(404)
@@ -1019,7 +1076,10 @@ def public_survey(slug):
 @app.route("/p/<slug>/responder", methods=["GET", "POST"])
 @limiter.limit("80 per hour")
 def answer_survey(slug):
-    s = Survey.query.filter_by(slug=slug, active=True).first_or_404()
+    s = Survey.query.filter_by(slug=slug).first_or_404()
+    if not survey_is_open(s):
+        session.pop("survey_state", None)
+        return render_template("survey_closed.html", survey=s)
     state = session.get("survey_state") or {}
     if state.get("survey") != s.id:
         return redirect(url_for("public_survey", slug=slug))
@@ -1201,6 +1261,8 @@ def ensure_schema():
             "survey": {
                 "identity_type": "VARCHAR(8) NOT NULL DEFAULT 'none'",
                 "shuffle_questions": "BOOLEAN NOT NULL DEFAULT FALSE",
+                "starts_at": "TIMESTAMP WITH TIME ZONE",
+                "ends_at": "TIMESTAMP WITH TIME ZONE",
             },
             "question": {
                 "answer_type": "VARCHAR(20) NOT NULL DEFAULT 'rating'",

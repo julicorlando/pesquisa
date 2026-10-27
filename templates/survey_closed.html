@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow center">
+  <div class="eyebrow">PESQUISA DE SATISFAÇÃO</div>
+  <h1>{{ survey.title }}</h1>
+  <p>Esta pesquisa não está recebendo respostas no momento.</p>
+  <p>Verifique o período de abertura com o responsável pela pesquisa.</p>
+  <a class="btn secondary" href="{{ url_for('index') }}">Voltar ao início</a>
+</div>
+{% endblock %}

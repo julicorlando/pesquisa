@@ -19,6 +19,8 @@
     <label>Descrição<textarea name="description" maxlength="2000">{{ survey.description }}</textarea></label>
     <label>Visibilidade<select name="target"><option value="lojista" {% if survey.target=='lojista' %}selected{% endif %}>Somente lojistas autorizados</option><option value="publico" {% if survey.target=='publico' %}selected{% endif %}>Público geral</option></select></label>
     <label>Documento de identificação solicitado<select name="identity_type"><option value="none" {% if survey.identity_type=='none' %}selected{% endif %}>Não solicitar documento</option><option value="cpf" {% if survey.identity_type=='cpf' %}selected{% endif %}>CPF</option><option value="cnpj" {% if survey.identity_type=='cnpj' %}selected{% endif %}>CNPJ</option></select></label>
+    <label>Início da pesquisa (horário de Brasília)<input type="datetime-local" name="starts_at" value="{{ starts_at_input }}"><small>Deixe em branco para iniciar assim que a pesquisa for publicada.</small></label>
+    <label>Encerramento da pesquisa (horário de Brasília)<input type="datetime-local" name="ends_at" value="{{ ends_at_input }}"><small>Deixe em branco para não definir data de encerramento.</small></label>
     <label class="check"><input name="shuffle_questions" type="checkbox" {% if survey.shuffle_questions %}checked{% endif %}> Embaralhar a ordem das perguntas para cada resposta</label><p class="muted">Se houver ramificação condicional, a ordem fica fixa para manter a pergunta dependente após sua condição.</p>
     <label class="check"><input name="active" type="checkbox" {% if survey.active %}checked{% endif %}> Pesquisa publicada e aberta para respostas</label>
     <button class="btn">Salvar configuração</button>
@@ -77,6 +79,7 @@
 {% else %}<p>Nenhuma pergunta cadastrada.</p>{% endfor %}
 </div>
 {% if current_user.role == 'master' %}
+<div class="card danger-zone"><h2>Limpar respostas</h2><p>Remove as respostas e os registros de identificação separados desta pesquisa. A pesquisa, as perguntas, os convites e os planos de ação serão preservados. Esta ação não pode ser desfeita.</p><form method="post" action="{{ url_for('clear_survey_responses', sid=survey.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" onclick="return confirm('Apagar permanentemente todas as respostas e identificações desta pesquisa? A pesquisa e as perguntas serão mantidas.')">Limpar respostas e identificações ({{ response_count }})</button></form></div>
 <div class="card danger-zone"><h2>Excluir pesquisa</h2><p>A exclusão também remove os resultados, e só é permitida quando não houver CPF ou CNPJ registrado.</p><form method="post" action="{{ url_for('delete_survey', sid=survey.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" onclick="return confirm('Excluir definitivamente esta pesquisa e seus resultados?')">Excluir pesquisa e resultados</button></form></div>
 {% endif %}
 <script>
