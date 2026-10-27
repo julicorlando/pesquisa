@@ -443,3 +443,89 @@ def create_master():
 
 if __name__ == "__main__":
     app.run(debug=os.environ.get("FLASK_DEBUG") == "1")
+
+
+DEFAULT_QUESTIONS = {
+ "Comercial": [
+  "Como você avalia o atendimento e a disponibilidade da equipe comercial?",
+  "As condições comerciais e orientações contratuais são comunicadas com clareza?",
+  "Como você avalia o suporte comercial às demandas da sua loja?",
+  "Como você avalia a agilidade nas respostas do setor Comercial?"
+ ],
+ "Marketing": [
+  "Como você avalia a divulgação das campanhas promocionais do shopping?",
+  "Como você avalia a comunicação antecipada das ações de marketing aos lojistas?",
+  "As campanhas realizadas contribuem para atrair visitantes ao shopping?",
+  "Como você avalia as oportunidades de participação dos lojistas nas campanhas?"
+ ],
+ "Limpeza": [
+  "Como você avalia a limpeza dos corredores e áreas comuns?",
+  "Como você avalia a limpeza e conservação dos banheiros?",
+  "Como você avalia a frequência de limpeza nas áreas comuns?",
+  "Como você avalia a agilidade no atendimento às solicitações de limpeza?"
+ ],
+ "Manutenção": [
+  "Como você avalia a conservação da estrutura física do shopping?",
+  "Como você avalia a iluminação das áreas comuns?",
+  "Como você avalia a agilidade no atendimento às solicitações de manutenção?",
+  "Como você avalia a qualidade das soluções realizadas pela Manutenção?"
+ ],
+ "Zeladoria": [
+  "Como você avalia a organização e conservação geral das áreas comuns?",
+  "Como você avalia o atendimento prestado pela Zeladoria?",
+  "Como você avalia a clareza das orientações operacionais recebidas?",
+  "Como você avalia o acompanhamento e encaminhamento de demandas pela Zeladoria?"
+ ],
+ "Lago": [
+  "Como você avalia a limpeza e conservação do lago?",
+  "Como você avalia a aparência e paisagismo da área do lago?",
+  "Como você avalia a segurança e a sinalização no entorno do lago?",
+  "Como você avalia a contribuição do lago para a experiência dos visitantes?"
+ ],
+ "Parque das Aves": [
+  "Como você avalia a limpeza e conservação do Parque das Aves?",
+  "Como você percebe as condições de cuidado e bem-estar das aves?",
+  "Como você avalia a segurança e organização do espaço?",
+  "Como você avalia a contribuição do Parque das Aves para a experiência dos visitantes?"
+ ],
+ "Administrativo": [
+  "Como você avalia o atendimento prestado pela Administração?",
+  "Como você avalia a clareza dos comunicados administrativos?",
+  "Como você avalia a agilidade nas respostas às demandas dos lojistas?",
+  "Como você avalia a transparência e organização dos processos administrativos?"
+ ],
+ "Estacionamento": [
+  "Como você avalia a organização e sinalização do estacionamento?",
+  "Como você avalia a limpeza e conservação do estacionamento?",
+  "Como você avalia a facilidade de entrada e saída dos veículos?",
+  "Como você avalia o funcionamento dos equipamentos e cancelas?",
+  "Como você avalia o atendimento da equipe de estacionamento?"
+ ],
+ "TI": [
+  "Como você avalia a facilidade de conexão ao Mall Wi-Fi público?",
+  "Como você avalia a estabilidade do Mall Wi-Fi público?",
+  "Como você avalia a velocidade do Mall Wi-Fi público?",
+  "Como você avalia o funcionamento dos recursos tecnológicos do estacionamento percebidos pelos usuários?"
+ ]
+}
+
+@app.cli.command("seed-survey")
+def seed_survey():
+    db.create_all()
+    slug = "satisfacao-lojistas-shopping-carpina"
+    survey = Survey.query.filter_by(slug=slug).first()
+    if survey:
+        print("Pesquisa já existe; nenhuma pergunta duplicada.")
+        return
+    survey = Survey(title="Pesquisa de Satisfação dos Lojistas — Shopping Carpina",
+                    slug=slug, description="Avalie os serviços oferecidos pelo Shopping Carpina. Uma nota de 1 a 5 por pergunta.",
+                    target="lojista", active=False)
+    db.session.add(survey)
+    db.session.flush()
+    order = 0
+    for sector, texts in DEFAULT_QUESTIONS.items():
+        for question_text in texts:
+            order += 1
+            db.session.add(Question(survey_id=survey.id, sector=sector, text=question_text, position=order))
+    db.session.commit()
+    print("Pesquisa criada com", order, "perguntas. Cadastre lojistas e abra-a no Master.")
