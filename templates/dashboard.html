@@ -63,9 +63,9 @@
 <p class="muted">As respostas estão separadas dos dados de identificação. Horários do dispositivo são informados pelo navegador e podem divergir do relógio do servidor.</p>
 <div class="cards">
 {% for detail in question_details %}
-  <section class="card">
-    <small>{{ detail.question.sector }} · {% if detail.count < 3 %}menos de 3 respostas{% else %}{{ detail.count }} resposta(s){% endif %}</small>
-    <h3>{{ detail.question.text }}</h3>
+  <details class="card question-answer-card">
+    <summary><small>{{ detail.question.sector }} · {% if detail.count < 3 %}menos de 3 respostas{% else %}{{ detail.count }} resposta(s){% endif %}</small><h3>{{ detail.question.text }}</h3><span class="muted">Clique para ver as respostas</span></summary>
+    <div class="question-answer-content">
     {% if detail.question.answer_type in ('rating','nps') %}
       {% if detail.distribution_suppressed %}<p class="muted">Distribuição e indicador aparecem após pelo menos 3 respostas.</p>{% else %}
         {% if detail.question.answer_type=='rating' %}<p>Média das respostas válidas: <strong>{{ detail.average if detail.average is not none else '—' }}</strong> / 5</p>{% else %}<p>NPS: <strong>{{ detail.nps if detail.nps is not none else '—' }}</strong></p>{% endif %}
@@ -81,10 +81,11 @@
     {% else %}
       <h4>Respostas abertas</h4>
       {% for answer in detail.open_answers %}
-        <div class="review-item"><p><strong>Tema: {{ answer.themes|join(', ') }}</strong></p><p class="open-answer">{{ answer.text }}</p><small>Servidor: {{ answer.submitted_at.strftime('%d/%m/%Y %H:%M:%S UTC') }} · Dispositivo: {{ answer.device_submitted_at|device_datetime(answer.device_timezone) }}{% if answer.device_timezone %} ({{ answer.device_timezone }}){% endif %}</small></div>
+        <div class="review-item"><p><strong>Tema: {{ answer.themes|join(', ') }}</strong></p><p class="open-answer">{{ answer.text }}</p><small>Resposta exibida sem identificação e em ordem aleatória.</small></div>
       {% else %}<p class="muted">Nenhuma resposta aberta neste período.</p>{% endfor %}
     {% endif %}
-  </section>
+    </div>
+  </details>
 {% else %}<div class="card">Nenhuma pergunta disponível para os filtros e o perfil selecionados.</div>{% endfor %}
 </div>
 {% if comment_themes %}<section class="card"><h2>Temas dos comentários abertos</h2><p>Classificação automática por palavras-chave para organizar a leitura. Confira o comentário original antes de decidir uma ação.</p><div class="cards">{% for theme,count in comment_themes.most_common() %}<div class="card"><strong>{{ theme }}</strong><div class="score">{{ count }}</div></div>{% endfor %}</div></section>{% endif %}
