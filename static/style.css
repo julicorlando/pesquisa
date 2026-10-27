@@ -384,3 +384,56 @@ a { text-underline-offset: .18em; }
 .question-answer-card > summary { min-height: 68px; display: flex; flex-direction: column; justify-content: center; }
 .question-answer-card > summary h3 { margin: 8px 0; }
 .question-answer-card[open] > summary { border-bottom: 1px solid var(--line, #d9e4e1); }
+
+/* Menus suspensos para organizar a navegação sem remover atalhos existentes. */
+.top nav { position: relative; }
+.nav-menu { position: relative; color: var(--blue); font-size: 14px; }
+.nav-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--blue);
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+.nav-menu > summary::-webkit-details-marker { display: none; }
+.nav-menu > summary::after { content: "▾"; margin-left: 8px; color: var(--teal-dark); font-size: 12px; }
+.nav-menu[open] > summary, .nav-menu > summary:hover {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--teal-dark);
+}
+.nav-menu > summary:focus-visible, .nav-submenu a:focus-visible {
+  outline: 3px solid var(--teal, #008b8b);
+  outline-offset: 2px;
+}
+.nav-submenu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  min-width: 230px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 12px 28px rgba(20,31,57,.16);
+}
+.nav-submenu a {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--blue);
+  text-decoration: none;
+  white-space: normal;
+}
+.nav-submenu a:hover { background: var(--canvas); color: var(--teal-dark); text-decoration: none; }
+@media (max-width: 700px) {
+  .nav-menu > summary { min-height: 40px; padding: 0 8px; }
+  .nav-submenu { min-width: min(250px, 82vw); }
+}
