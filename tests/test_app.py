@@ -7,7 +7,7 @@ import app as app_module
 os.environ["SECRET_KEY"] = "test-secret-is-only-for-tests-not-production"
 os.environ["DATABASE_URL"] = "sqlite://"
 import pytest
-from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, AlertSettings, SectorGoal, ReportSchedule, SMTPConfig, SystemIncident, Question, Response, Answer, ActionPlan, RespondentIdentity, Audit, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment, send_due_invite_reminders
+from app import app, db, limiter, User, Merchant, Survey, SurveyInvite, SurveyAlert, AlertSettings, SectorGoal, ReportSchedule, SMTPConfig, SystemIncident, Question, Response, Answer, ActionPlan, RespondentIdentity, Audit, valid_cnpj, valid_cpf, generate_password_hash, now, classify_comment, send_due_invite_reminders, survey_is_open, effective_smtp_settings
 
 @pytest.fixture()
 def client():
@@ -537,6 +537,11 @@ def test_automatic_reminder_only_sends_for_opted_in_surveys(client, monkeypatch)
             SurveyInvite(survey_id=disabled.id, email="pessoa2@example.test", created_at=due),
         ])
         db.session.commit()
+        assert Survey.query.filter_by(active=True).count() == 2
+        assert Survey.query.filter_by(automatic_reminders=True).count() == 1
+        assert survey_is_open(Survey.query.filter_by(slug="lembrete-ligado").one())
+        assert SurveyInvite.query.filter_by(survey_id=enabled.id, responded_at=None, reminder_sent_at=None).count() == 1
+        assert effective_smtp_settings()["host"] == "smtp.example.test"
         count = send_due_invite_reminders(now())
         assert count == 1
         invite = SurveyInvite.query.filter_by(survey_id=enabled.id).one()

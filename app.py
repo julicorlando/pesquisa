@@ -2195,10 +2195,10 @@ def public_invite_url(survey, token):
 def send_due_invite_reminders(run_at=None, batch_limit=100):
     run_at = run_at or now()
     sent = 0
-    surveys = Survey.query.filter_by(active=True, automatic_reminders=True).all()
+    surveys = Survey.query.filter_by(active=True).all()
     eligible = []
     for survey in surveys:
-        if not survey_is_open(survey):
+        if not survey.automatic_reminders or not survey_is_open(survey):
             continue
         cutoff = run_at - timedelta(days=survey.reminder_delay_days or 3)
         pending = (SurveyInvite.query.filter_by(survey_id=survey.id, reminder_sent_at=None, responded_at=None)
