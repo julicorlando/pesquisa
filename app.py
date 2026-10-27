@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 import json
 import hmac
 import hashlib
@@ -35,12 +36,12 @@ login_manager = LoginManager(app)
 login_manager.login_view = "login"
 limiter = Limiter(get_remote_address, app=app, default_limits=["250 per hour"], storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "memory://"))
 
-SECTORS = ["Comercial", "Marketing", "Limpeza", "Manutenção", "Zeladoria", "Lago", "Parque das Aves", "Administrativo", "Estacionamento", "TI"]
+SECTORS = ["Geral", "Comercial", "Marketing", "Limpeza", "Manutenção", "Zeladoria", "Lago", "Parque das Aves", "Administrativo", "Estacionamento", "TI"]
 ROLES = ["master", "auditoria", "comercial", "marketing", "operacional", "administrativo", "estacionamento", "ti"]
 ROLE_SECTORS = {
-    "comercial": ["Comercial"], "marketing": ["Marketing"],
-    "operacional": ["Limpeza", "Manutenção", "Zeladoria", "Lago", "Parque das Aves"],
-    "administrativo": ["Administrativo"], "estacionamento": ["Estacionamento"], "ti": ["TI"]
+    "comercial": ["Geral", "Comercial"], "marketing": ["Geral", "Marketing"],
+    "operacional": ["Geral", "Limpeza", "Manutenção", "Zeladoria", "Lago", "Parque das Aves"],
+    "administrativo": ["Geral", "Administrativo"], "estacionamento": ["Geral", "Estacionamento"], "ti": ["Geral", "TI"]
 }
 FACES = ["😠", "🙁", "😐", "😊", "😄"]
 FACE_NAMES = ["Muito insatisfeito", "Insatisfeito", "Regular", "Satisfeito", "Muito satisfeito"]
@@ -95,6 +96,25 @@ class User(UserMixin, db.Model):
     @property
     def is_active(self):
         return self.active
+
+class FirstAccessToken(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    used_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), default=now)
+    user = db.relationship("User")
+
+class SMTPConfig(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    host = db.Column(db.String(255), default="")
+    port = db.Column(db.Integer, default=587)
+    tls = db.Column(db.Boolean, default=True)
+    username = db.Column(db.String(255), default="")
+    from_address = db.Column(db.String(255), default="")
+    password_encrypted = db.Column(db.Text)
+    updated_at = db.Column(db.DateTime(timezone=True), default=now)
 
 class Survey(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -437,16 +457,46 @@ def toggle_merchant(mid):
 @app.route("/admin/users", methods=["GET", "POST"])
 @roles("master")
 def users():
+    first_access_url = None
     if request.method == "POST":
-        username, password, role = request.form.get("username", "").strip(), request.form.get("password", ""), request.form.get("role")
-        if len(password) < 12 or role not in ROLES or not username or User.query.filter_by(username=username).first():
-            flash("Usuário exclusivo, perfil válido e senha com pelo menos 12 caracteres.", "error")
+        username, role = request.form.get("username", "").strip(), request.form.get("role")
+        if role not in ROLES or not username or User.query.filter_by(username=username).first():
+            flash("Informe um usuário exclusivo e um perfil válido.", "error")
         else:
-            db.session.add(User(username=username[:90], password_hash=generate_password_hash(password), role=role))
+            user = User(username=username[:90], password_hash=generate_password_hash(secrets.token_urlsafe(32)), role=role)
+            db.session.add(user)
+            db.session.flush()
+            token = secrets.token_urlsafe(32)
+            db.session.add(FirstAccessToken(user_id=user.id, token_hash=hashlib.sha256(token.encode()).hexdigest(), expires_at=now() + timedelta(hours=24)))
             log("user_create", username + ":" + role)
             db.session.commit()
-            return redirect(url_for("users"))
-    return render_template("users.html", users=User.query.order_by(User.username).all(), roles=ROLES)
+            base_url = os.environ.get("PUBLIC_BASE_URL", "https://nps.shoppingcarpina.com.br").rstrip("/")
+            first_access_url = base_url + url_for("first_access", token=token)
+            flash("Usuário cadastrado. Copie o link de primeiro acesso exibido; ele expira em 24 horas.", "success")
+    return render_template("users.html", users=User.query.order_by(User.username).all(), roles=ROLES, first_access_url=first_access_url)
+
+@app.route("/first-access/<token>", methods=["GET", "POST"])
+@limiter.limit("10 per minute")
+def first_access(token):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    record = FirstAccessToken.query.filter_by(token_hash=token_hash).first()
+    valid = bool(record and record.used_at is None and record.expires_at > now() and record.user and record.user.active)
+    if not valid:
+        return render_template("first_access.html", invalid=True), 410
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        confirm = request.form.get("confirm_password", "")
+        if len(password) < 12:
+            flash("A senha precisa ter pelo menos 12 caracteres.", "error")
+        elif password != confirm:
+            flash("As senhas não conferem.", "error")
+        else:
+            record.user.password_hash = generate_password_hash(password)
+            record.used_at = now()
+            db.session.commit()
+            flash("Senha cadastrada. Agora você pode entrar.", "success")
+            return redirect(url_for("login"))
+    return render_template("first_access.html", invalid=False)
 
 @app.post("/admin/users/<int:uid>/edit")
 @roles("master")
@@ -504,14 +554,16 @@ def response_detail(rid):
     return render_template("response_detail.html", record=record, answers=[(db.session.get(Question, a.question_id), a) for a in record.answers])
 
 @app.get("/admin/open-answers")
-@roles("master")
+@login_required
 def open_answers():
-    rows = (db.session.query(Answer, Question, Response.submitted_at)
-            .join(Question, Question.id == Answer.question_id)
-            .join(Response, Response.id == Answer.response_id)
-            .filter(Question.answer_type == "open", Answer.answer_text.isnot(None))
-            .order_by(Response.submitted_at.desc()).limit(1000).all())
-    log("open_answers_access", "anonymous_answers")
+    query = (db.session.query(Answer, Question, Response.submitted_at)
+             .join(Question, Question.id == Answer.question_id)
+             .join(Response, Response.id == Answer.response_id)
+             .filter(Question.answer_type.in_(("open", "single", "multiple")), Answer.answer_text.isnot(None)))
+    if current_user.role != "master":
+        query = query.filter(Question.sector == "Geral")
+    rows = query.order_by(Response.submitted_at.desc()).limit(1000).all()
+    log("open_answers_access", "general_only" if current_user.role != "master" else "all_anonymous_answers")
     db.session.commit()
     return render_template("open_answers.html", records=rows)
 
@@ -658,22 +710,90 @@ def answer_survey(slug):
         return render_template("thanks.html", sent=sent)
     return render_template("answer.html", survey=s, questions=questions, values=request.form)
 
+def smtp_fernet():
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(app.config["SECRET_KEY"].encode()).digest())
+    return Fernet(key)
+
+def effective_smtp_settings():
+    config = SMTPConfig.query.order_by(SMTPConfig.id).first()
+    result = {
+        "host": (config.host if config and config.host else os.environ.get("SMTP_HOST", "")),
+        "port": (config.port if config else int(os.environ.get("SMTP_PORT", "587"))),
+        "tls": (config.tls if config else os.environ.get("SMTP_TLS", "1") == "1"),
+        "username": (config.username if config and config.username else os.environ.get("SMTP_USER", "")),
+        "from_address": (config.from_address if config and config.from_address else os.environ.get("SMTP_FROM", "")),
+        "password": os.environ.get("SMTP_PASSWORD", ""),
+    }
+    if config and config.password_encrypted:
+        try:
+            result["password"] = smtp_fernet().decrypt(config.password_encrypted.encode()).decode()
+        except Exception:
+            app.logger.error("Não foi possível descriptografar a senha SMTP configurada")
+            result["password"] = ""
+    return result
+
+@app.route("/admin/settings/smtp", methods=["GET", "POST"])
+@roles("master")
+def smtp_settings():
+    config = SMTPConfig.query.order_by(SMTPConfig.id).first()
+    if request.method == "POST":
+        host = request.form.get("host", "").strip()
+        from_address = request.form.get("from_address", "").strip()
+        username = request.form.get("username", "").strip()
+        try:
+            port = int(request.form.get("port", "587"))
+            if not 1 <= port <= 65535:
+                raise ValueError()
+        except (TypeError, ValueError):
+            flash("Informe uma porta SMTP entre 1 e 65535.", "error")
+            return render_template("smtp_settings.html", settings=smtp_form_values(config), password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")))
+        if not config:
+            config = SMTPConfig()
+            db.session.add(config)
+        config.host = host[:255]
+        config.port = port
+        config.tls = request.form.get("tls") == "on"
+        config.username = username[:255]
+        config.from_address = from_address[:255]
+        config.updated_at = now()
+        new_password = request.form.get("password", "")
+        if request.form.get("clear_password") == "on":
+            config.password_encrypted = None
+        elif new_password:
+            config.password_encrypted = smtp_fernet().encrypt(new_password.encode()).decode()
+        log("smtp_config_update", "settings_saved")
+        db.session.commit()
+        flash("Configuração SMTP salva.", "success")
+        config = SMTPConfig.query.order_by(SMTPConfig.id).first()
+    return render_template("smtp_settings.html", settings=smtp_form_values(config), password_saved=bool(config and config.password_encrypted) or bool(os.environ.get("SMTP_PASSWORD")))
+
+def smtp_form_values(config):
+    return {
+        "host": config.host if config and config.host else os.environ.get("SMTP_HOST", ""),
+        "port": config.port if config else os.environ.get("SMTP_PORT", "587"),
+        "tls": config.tls if config else os.environ.get("SMTP_TLS", "1") == "1",
+        "username": config.username if config and config.username else os.environ.get("SMTP_USER", ""),
+        "from_address": config.from_address if config and config.from_address else os.environ.get("SMTP_FROM", ""),
+    }
+
 def send_receipt(resp, survey, questions, answers, email):
-    host = os.environ.get("SMTP_HOST")
-    if not host or not email:
+    if not email:
+        return False
+    settings = effective_smtp_settings()
+    if not settings["host"]:
         return False
     msg = EmailMessage()
     msg["Subject"] = "Obrigado por participar — " + survey.title
-    msg["From"] = os.environ.get("SMTP_FROM", "pesquisa@example.invalid")
+    msg["From"] = settings["from_address"] or "pesquisa@example.invalid"
     msg["To"] = email
     msg.set_content("Obrigado por participar da pesquisa " + survey.title + ". Seus dados de identificação são armazenados separadamente e não são vinculados às respostas individuais.")
     try:
-        port = int(os.environ.get("SMTP_PORT", "587"))
-        with smtplib.SMTP(host, port, timeout=12) as smtp:
-            if os.environ.get("SMTP_TLS", "1") == "1":
+        with smtplib.SMTP(settings["host"], int(settings["port"]), timeout=12) as smtp:
+            if settings["tls"]:
                 smtp.starttls()
-            if os.environ.get("SMTP_USER"):
-                smtp.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASSWORD", ""))
+            if settings["username"]:
+                smtp.login(settings["username"], settings["password"])
             smtp.send_message(msg)
         return True
     except Exception:
