@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block content %}
+<h1>Configuração SMTP</h1><p>Usada para enviar o recibo por e-mail após uma resposta. A senha nunca é exibida novamente.</p>
+<div class="card"><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label>Servidor SMTP<input name="host" value="{{ settings.host }}" maxlength="255" autocomplete="off"></label>
+<label>Porta<input name="port" type="number" min="1" max="65535" value="{{ settings.port }}" required></label>
+<label class="check"><input name="tls" type="checkbox" {% if settings.tls %}checked{% endif %}> Usar STARTTLS</label>
+<label>Usuário SMTP<input name="username" value="{{ settings.username }}" maxlength="255" autocomplete="off"></label>
+<label>E-mail remetente<input name="from_address" type="email" value="{{ settings.from_address }}" maxlength="255"></label>
+<label>Senha SMTP{% if password_saved %} (já configurada; deixe em branco para manter){% endif %}<input name="password" type="password" autocomplete="new-password"></label>
+<label class="check"><input name="clear_password" type="checkbox"> Limpar senha salva no painel</label>
+<p class="muted">Quando um campo não estiver configurado aqui, o sistema pode usar as variáveis SMTP já definidas no servidor.</p><button class="btn">Salvar SMTP</button></form></div>
+{% endblock %}
