@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block content %}
+<h1>Primeiro acesso</h1>
+{% if invalid %}<div class="card"><p>Este link é inválido, expirou ou já foi utilizado. Peça ao Master um novo cadastro ou redefinição.</p></div>
+{% else %}<div class="card"><p>Cadastre uma senha com pelo menos 12 caracteres para concluir seu acesso.</p><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Nova senha<input name="password" type="password" minlength="12" autocomplete="new-password" required></label><label>Confirme a senha<input name="confirm_password" type="password" minlength="12" autocomplete="new-password" required></label><button class="btn">Salvar senha</button></form></div>{% endif %}
+{% endblock %}
