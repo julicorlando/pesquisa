@@ -60,7 +60,7 @@
   {% if compare_survey %}<h3>Pesquisa selecionada × pesquisa comparada</h3>{% if comparisons.survey %}<div class="tablewrap"><table><thead><tr><th>Setor</th><th>Pergunta correspondente</th><th>Selecionada</th><th>Comparada</th><th>Variação</th><th>Leitura</th></tr></thead><tbody>{% for row in comparisons.survey %}<tr><td>{{ row.question.sector }}</td><td>{{ row.question.text }}</td><td>{{ row.current }}{% if row.kind=='rating' %} / 5{% else %} NPS{% endif %}</td><td>{{ row.previous }}{% if row.kind=='rating' %} / 5{% else %} NPS{% endif %}</td><td>{{ '%+g'|format(row.difference) }}</td><td>{{ row.direction }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="muted">Não há perguntas correspondentes com pelo menos 3 respostas em ambas.</p>{% endif %}{% endif %}
 </section>
 <h2>Perguntas e respostas da pesquisa</h2>
-<p class="muted">As respostas estão separadas dos dados de identificação. Horários do dispositivo são informados pelo navegador e podem divergir do relógio do servidor.</p>
+<p class="muted">As respostas estão separadas dos dados de identificação. Respostas abertas são exibidas sem identificação e em ordem aleatória, sem horário individual.</p>
 <div class="cards">
 {% for detail in question_details %}
   <details class="card question-answer-card">
