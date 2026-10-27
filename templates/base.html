@@ -7,7 +7,7 @@
   <meta name="description" content="Pesquisa de satisfação do Shopping Carpina.">
   <title>{% block title %}Pesquisa | Shopping Carpina{% endblock %}</title>
   <link rel="icon" type="image/png" href="{{ url_for('static', filename='shopping-carpina-mark.png') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261027-question-answer-list') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261027-navigation-submenus') }}">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Pular para o conteúdo principal</a>
@@ -80,6 +80,24 @@ document.querySelectorAll('.tablewrap').forEach((region, index) => {
   region.tabIndex = 0;
   region.setAttribute('role', 'region');
   if (!region.hasAttribute('aria-label')) region.setAttribute('aria-label', 'Tabela de resultados ' + (index + 1) + '. Use rolagem horizontal se necessário.');
+});
+</script>
+<script>
+document.querySelectorAll('.nav-menu').forEach((menu) => {
+  menu.addEventListener('toggle', () => {
+    if (menu.open) document.querySelectorAll('.nav-menu').forEach((other) => {
+      if (other !== menu) other.open = false;
+    });
+  });
+});
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.nav-menu')) document.querySelectorAll('.nav-menu[open]').forEach((menu) => { menu.open = false; });
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    const open = document.querySelector('.nav-menu[open]');
+    if (open) { open.open = false; open.querySelector('summary')?.focus(); }
+  }
 });
 </script>
 </body>
