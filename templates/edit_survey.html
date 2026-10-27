@@ -11,6 +11,8 @@
     <label class="check"><input name="shuffle_questions" type="checkbox" {% if survey.shuffle_questions %}checked{% endif %}> Embaralhar a ordem das perguntas para cada resposta</label>
     <label class="check"><input name="active" type="checkbox" {% if survey.active %}checked{% endif %}> Pesquisa publicada e aberta para respostas</label>
     <button class="btn">Salvar configuração</button>
+    <button class="btn secondary" name="save_draft" value="yes">Salvar como rascunho</button>
+    <p class="muted">Rascunhos ficam fechados ao público. Cada pergunta é salva ao clicar em “Adicionar pergunta”.</p>
   </form>
 </div>
 <div class="card">
@@ -22,7 +24,7 @@
     <label>Tipo de resposta<select name="answer_type"><option value="rating">Avaliação de 1 a 5</option><option value="open">Resposta aberta (até 5.000 caracteres)</option><option value="single">Múltipla escolha (uma opção)</option><option value="multiple">Múltipla escolha (uma ou mais opções)</option></select></label>
     <label>Opções (uma por linha; 2 a 20; para múltipla escolha)<textarea name="choices" rows="5"></textarea></label>
     <label>Aviso opcional para quem responder<textarea name="notice" maxlength="500" placeholder="Ex.: considere apenas o estacionamento do shopping."></textarea></label>
-    <button class="btn">Adicionar pergunta</button>
+    <button class="btn">Adicionar pergunta</button><p class="muted">Ao adicionar, a pergunta é gravada imediatamente e permanece no rascunho.</p>
   </form>
 </div>
 <h2>Perguntas</h2>
