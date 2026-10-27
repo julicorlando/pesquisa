@@ -439,3 +439,45 @@ def test_keyboard_accessibility_is_present_on_public_survey(client):
     client.post("/p/a11y",data={"stage":"identity"})
     page=client.get("/p/a11y/responder")
     assert page.status_code==200 and b"aria-valuenow" in page.data and b"tabindex=\"-1\"" in page.data
+
+
+def test_whatsapp_required_is_validated_and_stored_separately(client):
+    with app.app_context():
+        survey = Survey(title="WhatsApp obrigatório", slug="whatsapp-obrigatorio", active=True,
+                        target="publico", whatsapp_mode="required")
+        db.session.add(survey); db.session.flush()
+        db.session.add(Question(survey_id=survey.id, sector="Geral", text="Avaliação?", position=1))
+        db.session.commit()
+    invalid = client.post("/p/whatsapp-obrigatorio", data={"stage":"identity"})
+    assert invalid.status_code == 200
+    assert "número de WhatsApp válido" in invalid.get_data(as_text=True)
+    with app.app_context():
+        assert RespondentIdentity.query.count() == 0
+    client.post("/p/whatsapp-obrigatorio", data={"stage":"identity", "whatsapp_number":"(81) 99999-1234"})
+    with app.app_context():
+        participant = RespondentIdentity.query.one()
+        assert participant.whatsapp_number == "(81) 99999-1234"
+        assert Response.query.count() == 0
+
+def test_whatsapp_optional_and_disabled_modes(client):
+    with app.app_context():
+        optional = Survey(title="WhatsApp opcional", slug="wa-opcional", active=True,
+                          target="publico", whatsapp_mode="optional")
+        disabled = Survey(title="Sem WhatsApp", slug="wa-desativado", active=True,
+                          target="publico", whatsapp_mode="none")
+        db.session.add_all([optional, disabled]); db.session.flush()
+        db.session.add_all([
+            Question(survey_id=optional.id, sector="Geral", text="Avaliação?", position=1),
+            Question(survey_id=disabled.id, sector="Geral", text="Avaliação?", position=1),
+        ])
+        db.session.commit()
+    page = client.get("/p/wa-opcional").get_data(as_text=True)
+    assert 'name="whatsapp_number"' in page and "opcional" in page
+    client.post("/p/wa-opcional", data={"stage":"identity"})
+    with app.app_context():
+        assert RespondentIdentity.query.filter_by(survey_id=1).one().whatsapp_number == ""
+    disabled_page = client.get("/p/wa-desativado").get_data(as_text=True)
+    assert 'name="whatsapp_number"' not in disabled_page
+    client.post("/p/wa-desativado", data={"stage":"identity", "whatsapp_number":"81999991234"})
+    with app.app_context():
+        assert RespondentIdentity.query.filter_by(survey_id=2).one().whatsapp_number == ""

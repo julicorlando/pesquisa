@@ -10,4 +10,5 @@
 {% if survey.identity_type in ('cpf','cnpj') %}<label>{{ survey.identity_type|upper }} solicitado nesta pesquisa<input name="document_number" required inputmode="numeric" maxlength="18"></label>{% endif %}
 <label>Nome (opcional)<input name="owner_name" maxlength="180"></label><label>E-mail para recibo (opcional)<input name="email" type="email" maxlength="255"></label>
 {% endif %}
-<button class="btn full">Continuar</button></form></div>{% endblock %}
+<button class="btn full">Continuar</button>{% if survey.whatsapp_mode in ('required','optional') %}<label>Número de WhatsApp{% if survey.whatsapp_mode == 'required' %}<span aria-hidden="true"> *</span>{% else %} (opcional){% endif %}<input name="whatsapp_number" type="tel" inputmode="tel" autocomplete="tel" maxlength="20" placeholder="(81) 99999-9999" {% if survey.whatsapp_mode == 'required' %}required{% endif %}><small>Este dado ficará separado das respostas e dos indicadores da pesquisa.</small></label>{% endif %}
+</form></div>{% endblock %}

@@ -191,6 +191,7 @@ class Survey(db.Model):
     active = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime(timezone=True), default=now)
     identity_type = db.Column(db.String(8), nullable=False, default="none")
+    whatsapp_mode = db.Column(db.String(12), nullable=False, default="none")
     shuffle_questions = db.Column(db.Boolean, nullable=False, default=False)
     starts_at = db.Column(db.DateTime(timezone=True))
     ends_at = db.Column(db.DateTime(timezone=True))
@@ -250,6 +251,7 @@ class RespondentIdentity(db.Model):
     store_name = db.Column(db.String(180), default="")
     owner_name = db.Column(db.String(180), default="")
     email = db.Column(db.String(255), default="")
+    whatsapp_number = db.Column(db.String(20), default="")
     submitted_at = db.Column(db.DateTime(timezone=True), default=now)
 
 class Answer(db.Model):
@@ -1051,7 +1053,8 @@ def manage_surveys():
         else:
             s = Survey(title=title[:200], slug=slug[:120], description=request.form.get("description", "")[:2000],
                        target=request.form.get("target") if request.form.get("target") in ("lojista", "publico") else "lojista",
-                       identity_type=("cnpj" if request.form.get("target") == "lojista" else "none"))
+                       identity_type=("cnpj" if request.form.get("target") == "lojista" else "none"),
+                       whatsapp_mode="none")
             db.session.add(s)
             log("survey_create", slug)
             db.session.commit()
@@ -1235,6 +1238,7 @@ def edit_survey(sid):
                 ends_at = parse_local_datetime(request.form.get("ends_at"))
                 target = request.form.get("target") if request.form.get("target") in ("lojista", "publico") else survey.target
                 identity_type = request.form.get("identity_type") if request.form.get("identity_type") in ("none", "cpf", "cnpj") else survey.identity_type
+                whatsapp_mode = request.form.get("whatsapp_mode") if request.form.get("whatsapp_mode") in ("none", "optional", "required") else survey.whatsapp_mode
                 response_limit = request.form.get("response_limit", "none")
                 if starts_at and ends_at and starts_at >= ends_at:
                     raise ValueError("A data de encerramento precisa ser posterior à data de início.")
@@ -1249,7 +1253,7 @@ def edit_survey(sid):
             else:
                 before = {
                     "title": survey.title, "description": survey.description or "", "target": survey.target,
-                    "active": survey.active, "identity_type": survey.identity_type, "response_limit": survey.response_limit,
+                    "active": survey.active, "identity_type": survey.identity_type, "whatsapp_mode": survey.whatsapp_mode, "response_limit": survey.response_limit,
                     "shuffle_questions": survey.shuffle_questions, "starts_at": survey.starts_at, "ends_at": survey.ends_at,
                 }
                 survey.title = request.form.get("title", survey.title)[:200]
@@ -1257,6 +1261,7 @@ def edit_survey(sid):
                 survey.target = target
                 survey.active = request.form.get("save_draft") != "yes" and request.form.get("active") == "on"
                 survey.identity_type = identity_type
+                survey.whatsapp_mode = whatsapp_mode
                 survey.response_limit = response_limit
                 survey.shuffle_questions = request.form.get("shuffle_questions") == "on"
                 survey.starts_at, survey.ends_at = starts_at, ends_at
@@ -1663,6 +1668,17 @@ def public_survey(slug):
     if request.method == "POST":
         if request.form.get("stage") == "identity":
             info = {k: request.form.get(k, "").strip()[:255] for k in ("store_name", "email", "owner_name", "cnpj")}
+            whatsapp = request.form.get("whatsapp_number", "").strip()[:20]
+            whatsapp_digits = re.sub(r"\D", "", whatsapp)
+            valid_whatsapp = bool(re.fullmatch(r"\+?[0-9\s().-]{10,20}", whatsapp) and 10 <= len(whatsapp_digits) <= 15)
+            if s.whatsapp_mode == "required" and not valid_whatsapp:
+                flash("Informe um número de WhatsApp válido para continuar.", "error")
+                return render_template("identity.html", survey=s)
+            if s.whatsapp_mode == "optional" and whatsapp and not valid_whatsapp:
+                flash("Informe um número de WhatsApp válido ou deixe o campo em branco.", "error")
+                return render_template("identity.html", survey=s)
+            if s.whatsapp_mode == "none":
+                whatsapp = ""
             authorized = s.target == "publico"
             matched = None
             if s.target == "lojista":
@@ -1711,6 +1727,7 @@ def public_survey(slug):
                     store_name=info.get("store_name", ""),
                     owner_name=info.get("owner_name", ""),
                     email=info.get("email", ""),
+                    whatsapp_number=whatsapp,
                     token_hash=hashlib.sha256(token.encode()).hexdigest()
                 )
                 db.session.add(pending)
@@ -2084,6 +2101,7 @@ def ensure_schema():
             additions = {
             "survey": {
                 "identity_type": "VARCHAR(8) NOT NULL DEFAULT 'none'",
+                "whatsapp_mode": "VARCHAR(12) NOT NULL DEFAULT 'none'",
                 "shuffle_questions": "BOOLEAN NOT NULL DEFAULT FALSE",
                 "starts_at": "TIMESTAMP WITH TIME ZONE",
                 "ends_at": "TIMESTAMP WITH TIME ZONE",
@@ -2109,6 +2127,7 @@ def ensure_schema():
             "respondent_identity": {
                 "eligibility_cnpj": "VARCHAR(14) NOT NULL DEFAULT ''",
                 "token_hash": "VARCHAR(64)",
+                "whatsapp_number": "VARCHAR(20) NOT NULL DEFAULT ''",
             },
         }
             for table, columns in additions.items():
