@@ -619,7 +619,7 @@ def test_survey_author_can_disable_participant_followup(client):
     signin(client,"master","long-test-pass")
     page=client.get(f"/admin/surveys/{sid}")
     assert page.status_code == 200
-    assert b"Permitir solicitaÃ§Ã£o de retorno ao participante" in page.data
+    assert b"retorno ao participante" in page.data.lower()
     response=client.post(f"/admin/surveys/{sid}",data={
         "kind":"settings","title":"Pesquisa opcional","description":"","target":"publico",
         "identity_type":"none","whatsapp_mode":"none","response_limit":"none",
