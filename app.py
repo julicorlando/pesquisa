@@ -137,7 +137,7 @@ def branch_value_valid(question, value):
     if not question or not value:
         return False
     if question.answer_type == "rating":
-        return value in ("1", "2", "3", "4", "5", "na")
+        return value in ("1", "2", "3", "4", "5") or (value == "na" and question.allow_na)
     if question.answer_type == "nps":
         return value in tuple(str(n) for n in range(11))
     return question.answer_type == "single" and value in question.choice_options
@@ -210,6 +210,7 @@ class Question(db.Model):
     position = db.Column(db.Integer, default=0)
     active = db.Column(db.Boolean, default=True)
     optional = db.Column(db.Boolean, nullable=False, default=False)
+    allow_na = db.Column(db.Boolean, nullable=False, default=True)
     answer_type = db.Column(db.String(20), nullable=False, default="rating")
     notice = db.Column(db.Text, default="")
     choices = db.Column(db.Text, nullable=False, default="[]")
@@ -1426,7 +1427,7 @@ def edit_survey(sid):
             elif answer_type in ("single", "multiple") and choices is None:
                 flash("Informe de 2 a 20 opções exclusivas, uma por linha, com até 200 caracteres cada.", "error")
             elif sector in SECTORS and text:
-                question = Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), branch_question_id=branch_parent.id if branch_parent else None, branch_value=branch_value if branch_parent else "", optional=request.form.get("optional") == "on")
+                question = Question(survey_id=sid, sector=sector, text=text[:1000], position=len(survey.questions)+1, answer_type=answer_type, notice=notice, choices=json.dumps(choices, ensure_ascii=False), branch_question_id=branch_parent.id if branch_parent else None, branch_value=branch_value if branch_parent else "", optional=request.form.get("optional") == "on", allow_na=request.form.get("allow_na") == "on")
                 db.session.add(question)
                 db.session.flush()
                 log("question_create", "survey:%s question:%s fields:sector,text,type,optional,notice,choices,branch" % (sid, question.id))
@@ -1453,12 +1454,13 @@ def edit_survey(sid):
                     db.session.delete(q)
                 log("question_remove", "survey:%s question:%s" % (sid, q.id))
             else:
-                before = {"text": q.text, "active": q.active, "optional": q.optional, "notice": q.notice or "",
+                before = {"text": q.text, "active": q.active, "optional": q.optional, "allow_na": q.allow_na, "notice": q.notice or "",
                     "answer_type": q.answer_type, "choices": q.choices, "branch_question_id": q.branch_question_id,
                     "branch_value": q.branch_value}
                 q.text = request.form.get("text", q.text)[:1000]
                 q.active = request.form.get("active") == "on"
                 q.optional = request.form.get("optional") == "on"
+                q.allow_na = request.form.get("allow_na") == "on"
                 q.notice = request.form.get("notice", "").strip()[:500]
                 if request.form.get("answer_type") in ("rating", "nps", "open", "single", "multiple"):
                     new_type = request.form.get("answer_type")
@@ -1984,7 +1986,7 @@ def answer_survey(slug):
                     return render_template("answer.html", survey=s, questions=questions, values=request.form)
                 answers[q.id] = {"rating": 0, "text": raw}
             else:
-                allowed = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10") if q.answer_type == "nps" else ("1", "2", "3", "4", "5", "na")
+                allowed = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10") if q.answer_type == "nps" else (("1", "2", "3", "4", "5", "na") if q.allow_na else ("1", "2", "3", "4", "5"))
                 if raw not in allowed:
                     flash("Responda todas as perguntas antes de confirmar.", "error")
                     return render_template("answer.html", survey=s, questions=questions, values=request.form)
@@ -2472,6 +2474,7 @@ def ensure_schema():
             "question": {
                 "answer_type": "VARCHAR(20) NOT NULL DEFAULT 'rating'",
                 "optional": "BOOLEAN NOT NULL DEFAULT FALSE",
+                "allow_na": "BOOLEAN NOT NULL DEFAULT TRUE",
                 "notice": "TEXT NOT NULL DEFAULT ''",
             "choices": "TEXT NOT NULL DEFAULT '[]'",
             "branch_question_id": "INTEGER",
