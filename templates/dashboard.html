@@ -61,7 +61,7 @@
 </section>
 <h2>Perguntas e respostas da pesquisa</h2>
 <p class="muted">As respostas estão separadas dos dados de identificação. Respostas abertas são exibidas sem identificação e em ordem aleatória, sem horário individual.</p>
-<div class="cards">
+<div class="question-answer-list">
 {% for detail in question_details %}
   <details class="card question-answer-card">
     <summary><small>{{ detail.question.sector }} · {% if detail.count < 3 %}menos de 3 respostas{% else %}{{ detail.count }} resposta(s){% endif %}</small><h3>{{ detail.question.text }}</h3><span class="muted">Clique para ver as respostas</span></summary>
